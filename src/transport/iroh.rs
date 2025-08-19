@@ -19,16 +19,19 @@ use tokio::task::JoinHandle;
 use crate::error::{RaftError, Result};
 #[cfg(feature = "observability")]
 use crate::metrics_otel::{attributes, safe_metrics, Timer};
-use crate::node_shared::SharedNodeState;
-use crate::transport::iroh_protocol::{
-    generate_request_id, read_message, write_message, MessageType as ProtocolMessageType,
+use crate::transport::shared::SharedNodeState;
+use crate::transport::protocol::{
+    generate_request_id, read_message, write_message, MessageType,
 };
 
 /// Metrics for Iroh Raft transport
 #[derive(Debug, Clone)]
 pub struct IrohRaftMetrics {
+    /// Number of currently active peer connections
     pub active_connections: usize,
+    /// Total number of messages sent since transport started
     pub messages_sent: u64,
+    /// Total number of messages received since transport started
     pub messages_received: u64,
 }
 
@@ -47,7 +50,7 @@ lazy_static::lazy_static! {
             .init()
     };
 }
-use crate::config_global;
+// use crate::config_global;  // Not needed for basic transport
 
 /// Raft-specific message types for optimization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -65,9 +68,9 @@ enum RaftMessagePriority {
 impl RaftMessagePriority {
     fn from_raft_message(msg: &Message) -> Self {
         match msg.msg_type() {
-            MessageType::MsgRequestVote | MessageType::MsgRequestVoteResponse => Self::Election,
-            MessageType::MsgHeartbeat | MessageType::MsgHeartbeatResponse => Self::Heartbeat,
-            MessageType::MsgSnapshot => Self::Snapshot,
+            raft::eraftpb::MessageType::MsgRequestVote | raft::eraftpb::MessageType::MsgRequestVoteResponse => Self::Election,
+            raft::eraftpb::MessageType::MsgHeartbeat | raft::eraftpb::MessageType::MsgHeartbeatResponse => Self::Heartbeat,
+            raft::eraftpb::MessageType::MsgSnapshot => Self::Snapshot,
             _ => Self::LogAppend,
         }
     }
@@ -114,6 +117,7 @@ impl PeerConnection {
                 if self._election_stream.is_none() {
                     self._election_stream = Some(self.connection.open_uni().await.map_err(|e| {
                         RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                             message: format!("Failed to open stream: {}", e),
                         }
                     })?);
@@ -121,6 +125,7 @@ impl PeerConnection {
                 self._election_stream
                     .as_mut()
                     .ok_or_else(|| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                         message: "Election stream should exist after creation".to_string(),
                     })
             }
@@ -129,6 +134,7 @@ impl PeerConnection {
                     self._heartbeat_stream =
                         Some(self.connection.open_uni().await.map_err(|e| {
                             RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                                 message: format!("Failed to open stream: {}", e),
                             }
                         })?);
@@ -136,6 +142,7 @@ impl PeerConnection {
                 self._heartbeat_stream
                     .as_mut()
                     .ok_or_else(|| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                         message: "Heartbeat stream should exist after creation".to_string(),
                     })
             }
@@ -143,6 +150,7 @@ impl PeerConnection {
                 if self._append_stream.is_none() {
                     self._append_stream = Some(self.connection.open_uni().await.map_err(|e| {
                         RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                             message: format!("Failed to open stream: {}", e),
                         }
                     })?);
@@ -150,6 +158,7 @@ impl PeerConnection {
                 self._append_stream
                     .as_mut()
                     .ok_or_else(|| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                         message: "Append stream should exist after creation".to_string(),
                     })
             }
@@ -157,6 +166,7 @@ impl PeerConnection {
                 if self._snapshot_stream.is_none() {
                     self._snapshot_stream = Some(self.connection.open_uni().await.map_err(|e| {
                         RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                             message: format!("Failed to open stream: {}", e),
                         }
                     })?);
@@ -164,6 +174,7 @@ impl PeerConnection {
                 self._snapshot_stream
                     .as_mut()
                     .ok_or_else(|| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                         message: "Snapshot stream should exist after creation".to_string(),
                     })
             }
@@ -349,7 +360,7 @@ impl IrohRaftTransport {
             "RAFT_SEND_IMMEDIATE: Serializing {:?} message for node {}",
             message.msg_type(), to
         );
-        let msg_data = crate::raft_codec::serialize_message(message)?;
+        let msg_data = crate::raft::messages::serialize_message(message)?;
         tracing::debug!(
             "RAFT_SEND_IMMEDIATE: Serialized message has {} bytes",
             msg_data.len()
@@ -357,14 +368,14 @@ impl IrohRaftTransport {
 
         // Create RPC request for the raft service
         let request_id = generate_request_id();
-        let request = crate::transport::iroh_protocol::RpcRequest {
+        let request = crate::transport::protocol::RpcRequest {
             service: "raft".to_string(),
             method: "raft.message".to_string(),
-            payload: bytes::Bytes::from(msg_data),
+            payload: msg_data,
         };
         
         // Serialize RPC request
-        let request_bytes = crate::transport::iroh_protocol::serialize_payload(&request)?;
+        let request_bytes = crate::transport::protocol::serialize_payload(&request)?;
 
         // Open bidirectional stream for RPC
         tracing::debug!(
@@ -373,6 +384,7 @@ impl IrohRaftTransport {
         );
         let (mut send, mut recv) = conn.connection.open_bi().await
             .map_err(|e| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                 message: format!("Failed to open bi stream: {}", e),
             })?;
 
@@ -381,10 +393,11 @@ impl IrohRaftTransport {
             "RAFT_SEND_IMMEDIATE: Writing RPC message to stream for node {} (request_id: {:?})",
             to, request_id
         );
-        write_message(&mut send, ProtocolMessageType::Request, request_id, &request_bytes).await?;
+        write_message(&mut send, MessageType::Request, Some(request_id), &request_bytes).await?;
         
         // Close the send stream to signal we're done sending
         send.finish().map_err(|e| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
             message: format!("Failed to finish send stream: {}", e),
         })?;
         
@@ -397,7 +410,7 @@ impl IrohRaftTransport {
         );
 
         // Update metrics
-        self.record_message_sent(message.msg_type());
+        self.record_raft_message_sent(message.msg_type());
 
         // Update last activity
         conn.last_activity = Instant::now();
@@ -443,7 +456,8 @@ impl IrohRaftTransport {
         queue.insert(insert_pos, buffered);
 
         // Limit buffer size
-        let max_buffered = config_global::get()?.cluster.peer.max_buffered_messages;
+        // TODO: Make this configurable
+        let max_buffered = 1000; // Default max buffered messages per peer
         while queue.len() > max_buffered {
             queue.pop_back();
         }
@@ -501,7 +515,7 @@ impl IrohRaftTransport {
         
         // Get the complete NodeAddr from the registry
         let node_addr = match node_registry.get_node_addr(peer_id).await {
-            Ok(addr) => {
+            Some(addr) => {
                 tracing::debug!(
                     "RAFT_CONNECT: Found peer {} in registry with Iroh ID {}, {} direct addresses, relay: {:?}",
                     peer_id,
@@ -511,10 +525,10 @@ impl IrohRaftTransport {
                 );
                 addr
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
-                    "RAFT_CONNECT: Peer {} not found in node registry: {}. Trying cluster members fallback. Available peers: {:?}",
-                    peer_id, e,
+                    "RAFT_CONNECT: Peer {} not found in node registry. Trying cluster members fallback. Available peers: {:?}",
+                    peer_id,
                     registry_entries.iter().map(|e| e.cluster_node_id).collect::<Vec<_>>()
                 );
                 
@@ -547,22 +561,11 @@ impl IrohRaftTransport {
                             }
                             
                             // Also register in node registry for future lookups
-                            if let Err(reg_err) = node_registry.register_node(
+                            node_registry.register_node(
                                 peer_id,
-                                iroh_node_id,
-                                node_addr.clone(),
-                                Some(peer_info.address.clone())
-                            ).await {
-                                tracing::warn!(
-                                    "RAFT_CONNECT: Failed to register peer {} in node registry during fallback: {}",
-                                    peer_id, reg_err
-                                );
-                            } else {
-                                tracing::info!(
-                                    "RAFT_CONNECT: Successfully registered peer {} in node registry during fallback",
-                                    peer_id
-                                );
-                            }
+                                iroh_node_id.to_string(),
+                                node_addr.clone()
+                            ).await;
                             
                             node_addr
                         } else {
@@ -570,27 +573,30 @@ impl IrohRaftTransport {
                                 "RAFT_CONNECT: Invalid Iroh node ID for peer {} in cluster members: {}",
                                 peer_id, p2p_node_id_str
                             );
-                            return Err(RaftError::ClusterError(
-                                format!("Peer {} has invalid Iroh node ID: {}", peer_id, p2p_node_id_str)
-                            ));
+                            return Err(RaftError::ClusterError {
+                                message: format!("Peer {} has invalid Iroh node ID: {}", peer_id, p2p_node_id_str),
+                                backtrace: snafu::Backtrace::new(),
+                            });
                         }
                     } else {
                         tracing::error!(
                             "RAFT_CONNECT: Peer {} found in cluster members but has no P2P node ID",
                             peer_id
                         );
-                        return Err(RaftError::ClusterError(
-                            format!("Peer {} has no P2P node ID", peer_id)
-                        ));
+                        return Err(RaftError::ClusterError {
+                            message: format!("Peer {} has no P2P node ID", peer_id),
+                            backtrace: snafu::Backtrace::new(),
+                        });
                     }
                 } else {
                     tracing::error!(
                         "RAFT_CONNECT: Peer {} not found in node registry or cluster members",
                         peer_id
                     );
-                    return Err(RaftError::ClusterError(
-                        format!("Peer {} not found in node registry or cluster members", peer_id)
-                    ));
+                    return Err(RaftError::ClusterError {
+                        message: format!("Peer {} not found in node registry or cluster members", peer_id),
+                        backtrace: snafu::Backtrace::new(),
+                    });
                 }
             }
         };
@@ -631,6 +637,7 @@ impl IrohRaftTransport {
                     peer_id, iroh_node_id, e
                 );
                 return Err(RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                     message: format!("Connection error to peer {}: {}", peer_id, e),
                 });
             }
@@ -642,6 +649,7 @@ impl IrohRaftTransport {
                 return Err(RaftError::Timeout {
                     operation: format!("connect to peer {}", peer_id),
                     duration: connection_timeout,
+                    backtrace: snafu::Backtrace::new(),
                 });
             }
         };
@@ -809,6 +817,24 @@ impl IrohRaftTransport {
             ],
         );
     }
+    
+    /// Record sent Raft message metrics
+    fn record_raft_message_sent(&self, msg_type: raft::eraftpb::MessageType) {
+        // Use try_lock to avoid blocking in async context
+        if let Ok(mut sent) = self.messages_sent.try_lock() {
+            let key = format!("Raft_{:?}", msg_type);
+            *sent.entry(key).or_insert(0) += 1;
+        }
+        
+        #[cfg(feature = "observability")]
+        RAFT_MESSAGES_SENT.add(
+            1,
+            &[
+                attributes::TRANSPORT_TYPE.string("iroh"),
+                attributes::MESSAGE_TYPE.string(format!("Raft_{:?}", msg_type)),
+            ],
+        );
+    }
 
     /// Get transport metrics
     pub async fn get_metrics(&self) -> IrohRaftMetrics {
@@ -864,6 +890,7 @@ async fn handle_incoming_connection(
     let remote_node_id = connection
         .remote_node_id()
         .map_err(|e| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
             message: format!("Failed to get remote node ID: {}", e),
         })?;
 
@@ -871,15 +898,13 @@ async fn handle_incoming_connection(
     let peers = node.get_peers().await;
     let peer_id = peers
         .iter()
-        .find(|p| p.node_id == remote_node_id.to_string())
-        .and_then(|p| {
-            p.node_id.parse::<u64>().map_err(|e| {
-                tracing::warn!("Failed to parse peer node ID '{}': {}", p.node_id, e);
-                e
-            }).ok()
-        })
+        .find(|p| p.p2p_node_id.as_ref() == Some(&remote_node_id.to_string()))
+        .map(|p| p.node_id)
         .ok_or_else(|| {
-            RaftError::ClusterError(format!("Unknown or invalid Iroh node: {}", remote_node_id))
+            RaftError::ClusterError {
+                message: format!("Unknown or invalid Iroh node: {}", remote_node_id),
+                backtrace: snafu::Backtrace::new(),
+            }
         })?;
 
     // Accept streams
@@ -920,12 +945,12 @@ async fn handle_raft_stream(
     loop {
         match read_message(stream).await {
             Ok((header, payload)) => {
-                if header.msg_type != ProtocolMessageType::Request {
+                if header.msg_type != MessageType::Request {
                     continue;
                 }
 
                 // Deserialize Raft message
-                let message: Message = crate::raft_codec::deserialize_message(&payload)?;
+                let message: Message = crate::raft::messages::deserialize_message(&payload)?;
 
                 // Record metrics
                 {
@@ -1097,14 +1122,14 @@ async fn send_message_batch(
     // Send each message as an RPC call to the raft service
     for message in messages {
         // Serialize the Raft message
-        let msg_data = crate::raft_codec::serialize_message(&message)?;
+        let msg_data = crate::raft::messages::serialize_message(&message)?;
         
         // Create RPC request for the raft service
-        let request_id = crate::transport::iroh_protocol::generate_request_id();
-        let request = crate::transport::iroh_protocol::RpcRequest {
+        let request_id = crate::transport::protocol::generate_request_id();
+        let request = crate::transport::protocol::RpcRequest {
             service: "raft".to_string(),
             method: "raft.message".to_string(),
-            payload: bytes::Bytes::from(msg_data),
+            payload: msg_data,
         };
         
         // Open bidirectional stream for RPC
@@ -1112,27 +1137,29 @@ async fn send_message_batch(
             .open_bi()
             .await
             .map_err(|e| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                 message: format!("Failed to open bi stream: {}", e),
             })?;
         
         // Serialize and send the RPC request
-        let request_bytes = crate::transport::iroh_protocol::serialize_payload(&request)?;
+        let request_bytes = crate::transport::protocol::serialize_payload(&request)?;
             
-        crate::transport::iroh_protocol::write_message(
+        crate::transport::protocol::write_message(
             &mut send,
-            crate::transport::iroh_protocol::MessageType::Request,
-            request_id,
+            crate::transport::protocol::MessageType::Request,
+            Some(request_id),
             &request_bytes,
         )
         .await?;
         
         // Close the send stream to signal we're done sending
         send.finish().map_err(|e| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
             message: format!("Failed to finish send stream: {}", e),
         })?;
         
         // Wait for response (just to confirm delivery)
-        let _ = crate::transport::iroh_protocol::read_message(&mut recv).await;
+        let _ = crate::transport::protocol::read_message(&mut recv).await;
         
         // Record metrics
         {
@@ -1163,16 +1190,21 @@ async fn create_connection_for_peer(
     let peer_info = node
         .get_peer(peer_id)
         .await
-        .ok_or_else(|| RaftError::ClusterError(format!("Unknown peer {}", peer_id)))?;
+        .ok_or_else(|| RaftError::ClusterError {
+            message: format!("Unknown peer {}", peer_id),
+            backtrace: snafu::Backtrace::new(),
+        })?;
 
     let p2p_node_id = peer_info
         .p2p_node_id
         .ok_or_else(|| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
             message: format!("Peer {} has no P2P node ID", peer_id),
         })?;
     let iroh_node_id = p2p_node_id
         .parse::<NodeId>()
         .map_err(|e| RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
             message: format!("Invalid Iroh node ID: {}", e),
         })?;
 
@@ -1185,6 +1217,7 @@ async fn create_connection_for_peer(
         Ok(Ok(conn)) => conn,
         Ok(Err(e)) => {
             return Err(RaftError::Internal {
+            backtrace: snafu::Backtrace::new(),
                 message: format!("Failed to connect to peer {}: {}", peer_id, e),
             });
         }
@@ -1192,6 +1225,7 @@ async fn create_connection_for_peer(
             return Err(RaftError::Timeout {
                 operation: format!("connect to peer {}", peer_id),
                 duration: connection_timeout,
+                backtrace: snafu::Backtrace::new(),
             });
         }
     };
@@ -1249,28 +1283,28 @@ mod tests {
     #[test]
     fn test_message_priority() {
         let mut vote_msg = Message::default();
-        vote_msg.set_msg_type(MessageType::MsgRequestVote);
+        vote_msg.set_msg_type(raft::eraftpb::MessageType::MsgRequestVote);
         assert_eq!(
             RaftMessagePriority::from_raft_message(&vote_msg),
             RaftMessagePriority::Election
         );
 
         let mut heartbeat_msg = Message::default();
-        heartbeat_msg.set_msg_type(MessageType::MsgHeartbeat);
+        heartbeat_msg.set_msg_type(raft::eraftpb::MessageType::MsgHeartbeat);
         assert_eq!(
             RaftMessagePriority::from_raft_message(&heartbeat_msg),
             RaftMessagePriority::Heartbeat
         );
 
         let mut append_msg = Message::default();
-        append_msg.set_msg_type(MessageType::MsgAppend);
+        append_msg.set_msg_type(raft::eraftpb::MessageType::MsgAppend);
         assert_eq!(
             RaftMessagePriority::from_raft_message(&append_msg),
             RaftMessagePriority::LogAppend
         );
 
         let mut snapshot_msg = Message::default();
-        snapshot_msg.set_msg_type(MessageType::MsgSnapshot);
+        snapshot_msg.set_msg_type(raft::eraftpb::MessageType::MsgSnapshot);
         assert_eq!(
             RaftMessagePriority::from_raft_message(&snapshot_msg),
             RaftMessagePriority::Snapshot

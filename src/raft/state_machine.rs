@@ -7,7 +7,7 @@
 //! own distributed state machines with Raft consensus.
 
 pub use super::generic_state_machine::{
-    CommandEncoder, GenericRaftStateMachine, StateMachine, StateMachineResult,
+    CommandEncoder, GenericRaftStateMachine, StateMachine,
 };
 
 // Re-export the key-value store example as a reference implementation
@@ -22,7 +22,7 @@ pub use super::proposals::{
 /// 
 /// This provides a concrete instantiation of the generic state machine that
 /// applications can use as a starting point or for testing purposes.
-pub type ExampleRaftStateMachine = GenericRaftStateMachine<KeyValueStore, KvCommand, KvState>;
+pub type ExampleRaftStateMachine = GenericRaftStateMachine<KeyValueStore>;
 
 impl ExampleRaftStateMachine {
     /// Create a new example Raft state machine using the key-value store

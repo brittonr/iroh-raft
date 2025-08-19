@@ -4,7 +4,7 @@
 //! implement the generic StateMachine trait. This can serve as a reference
 //! for other applications wanting to use iroh-raft.
 
-use super::generic_state_machine::{StateMachine, StateMachineResult};
+use super::generic_state_machine::StateMachine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, info};
@@ -125,8 +125,11 @@ impl Default for KeyValueStore {
     }
 }
 
-impl StateMachine<KvCommand, KvState> for KeyValueStore {
-    async fn apply_command(&mut self, command: KvCommand) -> StateMachineResult<()> {
+impl StateMachine for KeyValueStore {
+    type Command = KvCommand;
+    type State = KvState;
+
+    async fn apply_command(&mut self, command: Self::Command) -> Result<(), crate::error::RaftError> {
         debug!("Applying KV command: {:?}", command);
 
         match command {
@@ -163,12 +166,12 @@ impl StateMachine<KvCommand, KvState> for KeyValueStore {
         Ok(())
     }
 
-    async fn create_snapshot(&self) -> StateMachineResult<KvState> {
+    async fn create_snapshot(&self) -> Result<Self::State, crate::error::RaftError> {
         debug!("Creating KV snapshot with {} keys", self.state.len());
         Ok(self.state.clone())
     }
 
-    async fn restore_from_snapshot(&mut self, snapshot: KvState) -> StateMachineResult<()> {
+    async fn restore_from_snapshot(&mut self, snapshot: Self::State) -> Result<(), crate::error::RaftError> {
         debug!(
             "Restoring KV state from snapshot: {} keys, version {}",
             snapshot.len(), 
@@ -187,7 +190,7 @@ impl StateMachine<KvCommand, KvState> for KeyValueStore {
         Ok(())
     }
 
-    fn get_current_state(&self) -> &KvState {
+    fn get_current_state(&self) -> &Self::State {
         &self.state
     }
 }

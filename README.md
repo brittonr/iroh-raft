@@ -98,6 +98,48 @@ The crate follows these principles:
 4. **Type Safety**: Leverage Rust's type system for correctness
 5. **Testability**: Mockable components for testing
 
+## Testing
+
+### Deterministic Simulation Tests
+
+The crate includes comprehensive deterministic simulation tests using [madsim](https://github.com/madsim-rs/madsim) to test distributed consensus scenarios that are difficult to test reliably with traditional testing methods.
+
+#### Running Simulation Tests
+
+```bash
+# Run all madsim simulation tests
+cargo test --features madsim --test madsim_tests
+
+# Run specific simulation test
+cargo test --features madsim --test madsim_tests test_raft_consensus_under_partition
+
+# Run with output to see test progress
+cargo test --features madsim --test madsim_tests -- --nocapture
+```
+
+#### Test Scenarios Covered
+
+- **Network Partitions**: Test Raft behavior under various network partition scenarios
+- **Leader Election**: Deterministic leader election with controlled timing
+- **Message Loss**: Behavior under message loss and network unreliability
+- **Node Failures**: Node crash and recovery scenarios
+- **Concurrent Operations**: Multiple concurrent proposals and leadership changes
+- **Split-Brain Prevention**: Ensuring no split-brain scenarios occur
+- **Log Replication**: Proper log replication with failures and recovery
+- **Invariant Safety**: Verification of core Raft safety properties
+
+All tests use fixed seeds for deterministic execution, making them reproducible and reliable for CI/CD pipelines.
+
+### Regular Tests
+
+```bash
+# Run standard unit and integration tests
+cargo test
+
+# Run with test helpers
+cargo test --features test-helpers
+```
+
 ## Contributing
 
 This crate provides a solid foundation for distributed consensus applications. Areas where contributions would be valuable:

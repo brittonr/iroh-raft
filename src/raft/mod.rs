@@ -70,7 +70,8 @@
 //!
 //! ### Implementing a Custom State Machine
 //! ```rust,no_run
-//! use iroh_raft::raft::{StateMachine, StateMachineResult};
+//! use iroh_raft::raft::StateMachine;
+//! use iroh_raft::error::RaftError;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,8 +89,11 @@
 //!     state: MyState,
 //! }
 //!
-//! impl StateMachine<MyCommand, MyState> for MyStateMachine {
-//!     async fn apply_command(&mut self, command: MyCommand) -> StateMachineResult<()> {
+//! impl StateMachine for MyStateMachine {
+//!     type Command = MyCommand;
+//!     type State = MyState;
+//!
+//!     async fn apply_command(&mut self, command: Self::Command) -> Result<(), RaftError> {
 //!         match command {
 //!             MyCommand::Increment { amount } => {
 //!                 self.state.counter += amount;
@@ -101,16 +105,16 @@
 //!         Ok(())
 //!     }
 //!
-//!     async fn create_snapshot(&self) -> StateMachineResult<MyState> {
+//!     async fn create_snapshot(&self) -> Result<Self::State, RaftError> {
 //!         Ok(self.state.clone())
 //!     }
 //!
-//!     async fn restore_from_snapshot(&mut self, snapshot: MyState) -> StateMachineResult<()> {
+//!     async fn restore_from_snapshot(&mut self, snapshot: Self::State) -> Result<(), RaftError> {
 //!         self.state = snapshot;
 //!         Ok(())
 //!     }
 //!
-//!     fn get_current_state(&self) -> &MyState {
+//!     fn get_current_state(&self) -> &Self::State {
 //!         &self.state
 //!     }
 //! }
@@ -141,13 +145,14 @@
 // Core generic components
 pub mod generic_state_machine;
 pub mod kv_example;
+pub mod messages;
 pub mod proposals;
 pub mod state_machine;
 
 // Re-export commonly used types for convenience
 pub use self::state_machine::{
     CommandEncoder, ExampleRaftStateMachine, GenericRaftStateMachine, 
-    KvCommand, KvState, KeyValueStore, StateMachine, StateMachineResult
+    KvCommand, KvState, KeyValueStore, StateMachine
 };
 
 // Re-export generic proposals

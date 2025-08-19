@@ -532,7 +532,6 @@ macro_rules! time_operation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -588,12 +587,12 @@ mod tests {
         node_metrics.update_uptime(Duration::from_secs(3600));
     }
 
-    #[test]
-    fn test_latency_timer() {
+    #[tokio::test]
+    async fn test_latency_timer() {
         let timer = LatencyTimer::start("test_operation");
         
         // Simulate some work
-        thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
         
         let elapsed = timer.elapsed();
         assert!(elapsed >= Duration::from_millis(10));

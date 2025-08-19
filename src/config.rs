@@ -520,7 +520,7 @@ impl Default for SnapshotConfig {
 impl Default for TransportConfig {
     fn default() -> Self {
         Self {
-            bind_address: "127.0.0.1:0".parse().unwrap(), // Random port
+            bind_address: "127.0.0.1:0".parse().expect("Valid default bind address"), // Random port
             peers: Vec::new(),
             connection: ConnectionConfig::default(),
             iroh: IrohConfig::default(),
@@ -849,7 +849,7 @@ impl ConfigBuilder {
     pub fn bind_address<A: Into<String>>(mut self, addr: A) -> Self {
         let addr_str = addr.into();
         self.config.transport.bind_address = addr_str.parse().unwrap_or_else(|_| {
-            "127.0.0.1:0".parse().unwrap()
+            "127.0.0.1:0".parse().expect("Valid default bind address")
         });
         self
     }

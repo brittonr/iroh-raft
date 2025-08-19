@@ -36,7 +36,8 @@ impl RaftStorage {
         tokio::fs::create_dir_all(data_dir).await
             .map_err(|e| Error::Io { 
                 operation: "create data directory".to_string(), 
-                source: e 
+                source: e,
+                backtrace: snafu::Backtrace::new(),
             })?;
 
         let db_path = data_dir.join("raft.db");
@@ -133,8 +134,11 @@ impl RaftStorage {
         write_txn.commit()
             .map_err(|e| Error::storage_error("commit entries", e))?;
 
+        let last_index = entries.last()
+            .map(|entry| entry.index)
+            .unwrap_or(0);
         debug!("Appended {} entries, first_index={}, last_index={}", 
-               entries.len(), entries[0].index, entries.last().unwrap().index);
+               entries.len(), entries[0].index, last_index);
         Ok(())
     }
 
@@ -283,7 +287,7 @@ impl Storage for RaftStorage {
                 entries.push(entry);
                 total_size += entry_size;
             } else {
-                return Err(StorageError::Unavailable);
+                return Err(raft::Error::Store(StorageError::Unavailable).into());
             }
         }
 
@@ -327,7 +331,7 @@ impl Storage for RaftStorage {
 
             Ok(entry.term)
         } else {
-            Err(StorageError::Unavailable)
+            Err(raft::Error::Store(StorageError::Unavailable).into())
         }
     }
 
@@ -354,7 +358,7 @@ impl Storage for RaftStorage {
         let log_table = read_txn.open_table(RAFT_LOG_TABLE)
             .map_err(|e| StorageError::Other(Box::new(e)))?;
 
-        if let Some(first) = log_table.range(..)
+        if let Some(first) = log_table.range::<u64>(..)
             .map_err(|e| StorageError::Other(Box::new(e)))?
             .next() {
             
@@ -372,7 +376,7 @@ impl Storage for RaftStorage {
         let log_table = read_txn.open_table(RAFT_LOG_TABLE)
             .map_err(|e| StorageError::Other(Box::new(e)))?;
 
-        if let Some(last) = log_table.range(..)
+        if let Some(last) = log_table.range::<u64>(..)
             .map_err(|e| StorageError::Other(Box::new(e)))?
             .next_back() {
             
@@ -420,6 +424,6 @@ impl Storage for RaftStorage {
         }
 
         // Return temporary unavailable - snapshot will be created later
-        Err(StorageError::SnapshotTemporarilyUnavailable)
+        Err(raft::Error::Store(StorageError::SnapshotTemporarilyUnavailable).into())
     }
 }

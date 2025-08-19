@@ -18,7 +18,12 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone)]
 pub enum TransportMessage {
     /// Raft protocol message
-    Raft { from: u64, message: Message },
+    Raft { 
+        /// Source node ID
+        from: u64, 
+        /// Raft consensus message
+        message: Message 
+    },
 }
 
 /// Simplified Iroh transport for Raft messages
@@ -59,14 +64,16 @@ impl IrohTransport {
     
     /// Start the transport
     pub async fn start(&self) -> Result<()> {
-        info!("Starting Iroh transport for node {}", self.config.id);
+        info!("Starting Iroh transport for node {:?}", self.config.id);
         
-        // Create Iroh endpoint
+        // Create Iroh endpoint with a random secret key
+        let secret_key = iroh::SecretKey::generate(&mut rand::thread_rng());
         let endpoint = Endpoint::builder()
+            .secret_key(secret_key)
             .discovery_n0()
             .bind()
             .await
-            .map_err(|e| Error::transport("create iroh endpoint", e))?;
+            .map_err(|e| Error::transport_error(&format!("create iroh endpoint: {}", e)))?;
         
         // Store the endpoint
         {
@@ -76,13 +83,14 @@ impl IrohTransport {
         }
         
         // Initialize known peers
-        let mut peers = self.peers.write().await;
-        for peer in &self.config.peers {
-            // For now, generate a dummy Iroh node ID from the peer ID
-            // In a real implementation, you'd discover or configure these properly
-            let iroh_id = IrohNodeId::from([peer.id as u8; 32]);
-            peers.insert(peer.id, iroh_id);
-        }
+        // TODO: Add peer configuration to NodeConfig
+        // let mut peers = self.peers.write().await;
+        // for peer in &self.config.peers {
+        //     // For now, generate a dummy Iroh node ID from the peer ID
+        //     // In a real implementation, you'd discover or configure these properly
+        //     let iroh_id = IrohNodeId::from([peer.id as u8; 32]);
+        //     peers.insert(peer.id, iroh_id);
+        // }
         
         // Mark as running
         *self.running.write().await = true;
@@ -93,7 +101,7 @@ impl IrohTransport {
     
     /// Stop the transport
     pub async fn stop(&self) -> Result<()> {
-        info!("Stopping Iroh transport for node {}", self.config.id);
+        info!("Stopping Iroh transport for node {:?}", self.config.id);
         
         // Mark as not running
         *self.running.write().await = false;
@@ -251,12 +259,15 @@ mod tests {
         assert!(transport.is_running().await);
         
         // Add a peer manually for testing
-        let peer_iroh_id = iroh::NodeId::from([2u8; 32]);
-        transport.add_peer(2, peer_iroh_id).await?;
+        let secret_key = iroh::SecretKey::generate(&mut rand::thread_rng());
+        let peer_iroh_id = secret_key.public();
+        let result = transport.add_peer(2, peer_iroh_id).await;
+        assert!(result.is_ok(), "add_peer failed: {:?}", result);
         
         // Check peers
         let peers = transport.connected_peers().await;
-        assert_eq!(peers.len(), 1);
+        println!("Connected peers: {:?}", peers);
+        assert_eq!(peers.len(), 1, "Expected 1 peer, found {}: {:?}", peers.len(), peers);
         assert!(peers.contains(&2));
         
         // Stop transport

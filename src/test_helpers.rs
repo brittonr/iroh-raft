@@ -693,6 +693,62 @@ pub mod generators {
     pub fn cluster_size_strategy() -> impl Strategy<Value = usize> {
         1usize..=7  // Reasonable cluster sizes for testing
     }
+
+    /// Generate Raft messages for testing
+    pub fn raft_message_strategy() -> impl Strategy<Value = crate::raft::messages::RaftMessage> {
+        use crate::raft::messages::*;
+        
+        prop_oneof![
+            // Raft protocol messages (simplified - using basic Message structure)
+            (node_id_strategy(), node_id_strategy(), 1u64..100u64)
+                .prop_map(|(from, to, term)| {
+                    use raft::prelude::*;
+                    let mut msg = Message::default();
+                    msg.from = from;
+                    msg.to = to;
+                    msg.term = term;
+                    msg.set_msg_type(MessageType::MsgHeartbeat);
+                    RaftMessage::Raft(msg)
+                }),
+            
+            // Proposal messages
+            proposal_data_strategy()
+                .prop_map(|data| RaftMessage::Propose(RaftProposal::new(data))),
+            
+            // Configuration change messages
+            (node_id_strategy(), string_regex("[a-zA-Z0-9.-]+:[0-9]+").unwrap())
+                .prop_map(|(node_id, address)| {
+                    RaftMessage::ConfChange(RaftConfChange {
+                        change_type: ConfChangeType::AddNode,
+                        node_id,
+                        address,
+                        p2p_node_id: None,
+                        p2p_addresses: vec![],
+                        p2p_relay_url: None,
+                        response_tx: None,
+                    })
+                }),
+        ]
+    }
+
+    /// Generate configuration change context for testing
+    pub fn conf_change_context_strategy() -> impl Strategy<Value = crate::raft::messages::ConfChangeContext> {
+        use crate::raft::messages::ConfChangeContext;
+        
+        (
+            string_regex("[a-zA-Z0-9.-]+:[0-9]+").unwrap(),
+            prop::option::of(string_regex("[a-zA-Z0-9]{32,64}").unwrap()),
+            vec(string_regex("[a-zA-Z0-9.-]+:[0-9]+").unwrap(), 0..=3),
+            prop::option::of(string_regex("https://[a-zA-Z0-9.-]+").unwrap()),
+        ).prop_map(|(address, p2p_node_id, p2p_addresses, p2p_relay_url)| {
+            ConfChangeContext {
+                address,
+                p2p_node_id,
+                p2p_addresses,
+                p2p_relay_url,
+            }
+        })
+    }
 }
 
 /// Test execution utilities

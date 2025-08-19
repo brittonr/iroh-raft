@@ -43,6 +43,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
     if data.len() < 26 {
         // Minimum size: 8+8+1+4+4+1
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: "insufficient data".into(),
         });
@@ -55,6 +56,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
         data[cursor..cursor + 8]
             .try_into()
             .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "Entry".to_string(),
                 source: "failed to read index bytes".into(),
             })?,
@@ -66,6 +68,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
         data[cursor..cursor + 8]
             .try_into()
             .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "Entry".to_string(),
                 source: "failed to read term bytes".into(),
             })?,
@@ -79,6 +82,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
     // Read data length and ensure we have enough bytes
     if cursor + 4 > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: "insufficient data for data length".into(),
         });
@@ -87,6 +91,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
         data[cursor..cursor + 4]
             .try_into()
             .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "Entry".to_string(),
                 source: "failed to read data length bytes".into(),
             })?,
@@ -96,6 +101,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
     // Check if we have enough bytes for data
     if cursor + data_len > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: format!(
                 "insufficient data for entry data: need {} bytes, have {}",
@@ -110,12 +116,14 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
     // Read context length and ensure we have enough bytes
     if cursor + 4 > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: "insufficient data for context length".into(),
         });
     }
     let context_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| {
         RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: "failed to read context length bytes".into(),
         }
@@ -125,6 +133,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
     // Check if we have enough bytes for context
     if cursor + context_len > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: format!(
                 "insufficient data for context: need {} bytes, have {}",
@@ -140,6 +149,7 @@ pub fn deserialize_entry(data: &[u8]) -> Result<Entry> {
     // Check if we have the sync_log byte
     if cursor >= data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "Entry".to_string(),
             source: "insufficient data for sync_log".into(),
         });
@@ -170,6 +180,7 @@ pub fn serialize_hard_state(hs: &HardState) -> Result<Vec<u8>> {
 pub fn deserialize_hard_state(data: &[u8]) -> Result<HardState> {
     if data.len() != 24 {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "HardState".to_string(),
             source: "invalid data length".into(),
         });
@@ -180,6 +191,7 @@ pub fn deserialize_hard_state(data: &[u8]) -> Result<HardState> {
         data[0..8]
             .try_into()
             .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "HardState".to_string(),
                 source: "failed to read term bytes".into(),
             })?,
@@ -188,6 +200,7 @@ pub fn deserialize_hard_state(data: &[u8]) -> Result<HardState> {
         data[8..16]
             .try_into()
             .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "HardState".to_string(),
                 source: "failed to read vote bytes".into(),
             })?,
@@ -196,6 +209,7 @@ pub fn deserialize_hard_state(data: &[u8]) -> Result<HardState> {
         data[16..24]
             .try_into()
             .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "HardState".to_string(),
                 source: "failed to read commit bytes".into(),
             })?,
@@ -243,6 +257,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     if data.len() < 16 {
         // Minimum: 4 length fields
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "insufficient data".into(),
         });
@@ -254,12 +269,14 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     // Read voters
     if cursor + 4 > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "insufficient data for voters length".into(),
         });
     }
     let voters_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| {
         RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "failed to read voters length bytes".into(),
         }
@@ -269,6 +286,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     for _ in 0..voters_len {
         if cursor + 8 > data.len() {
             return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "ConfState".to_string(),
                 source: "insufficient data for voter".into(),
             });
@@ -277,6 +295,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
             data[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                     message_type: "ConfState".to_string(),
                     source: "failed to read voter bytes".into(),
                 })?,
@@ -287,12 +306,14 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     // Read learners
     if cursor + 4 > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "insufficient data for learners length".into(),
         });
     }
     let learners_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| {
         RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "failed to read learners length bytes".into(),
         }
@@ -302,6 +323,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     for _ in 0..learners_len {
         if cursor + 8 > data.len() {
             return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "ConfState".to_string(),
                 source: "insufficient data for learner".into(),
             });
@@ -310,6 +332,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
             data[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                     message_type: "ConfState".to_string(),
                     source: "failed to read learner bytes".into(),
                 })?,
@@ -320,12 +343,14 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     // Read voters_outgoing
     if cursor + 4 > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "insufficient data for voters_outgoing length".into(),
         });
     }
     let voters_out_len = u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| {
         RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "failed to read voters_outgoing length bytes".into(),
         }
@@ -335,6 +360,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     for _ in 0..voters_out_len {
         if cursor + 8 > data.len() {
             return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "ConfState".to_string(),
                 source: "insufficient data for voter_outgoing".into(),
             });
@@ -343,6 +369,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
             data[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                     message_type: "ConfState".to_string(),
                     source: "failed to read voter_outgoing bytes".into(),
                 })?,
@@ -353,6 +380,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     // Read learners_next
     if cursor + 4 > data.len() {
         return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
             message_type: "ConfState".to_string(),
             source: "insufficient data for learners_next length".into(),
         });
@@ -360,6 +388,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     let learners_next_len =
         u32::from_le_bytes(data[cursor..cursor + 4].try_into().map_err(|_| {
             RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "ConfState".to_string(),
                 source: "failed to read learners_next length bytes".into(),
             }
@@ -369,6 +398,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
     for _ in 0..learners_next_len {
         if cursor + 8 > data.len() {
             return Err(RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                 message_type: "ConfState".to_string(),
                 source: "insufficient data for learner_next".into(),
             });
@@ -377,6 +407,7 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
             data[cursor..cursor + 8]
                 .try_into()
                 .map_err(|_| RaftError::Serialization {
+            backtrace: snafu::Backtrace::new(),
                     message_type: "ConfState".to_string(),
                     source: "failed to read learner_next bytes".into(),
                 })?,
@@ -394,16 +425,20 @@ pub fn deserialize_conf_state(data: &[u8]) -> Result<ConfState> {
 
 /// Serialize a Raft message to bytes
 pub fn serialize_message(msg: &Message) -> Result<Vec<u8>> {
-    // Use postcard for message serialization since it's simple and efficient
-    postcard::to_allocvec(msg).map_err(|e| RaftError::Serialization {
-        message_type: "Message".to_string(),
-        source: Box::new(e),
-    })
+    // Use prost 0.11 for serialization (raft uses prost-codec with 0.11)
+    use prost::Message as ProstMessage;
+    
+    let encoded = msg.encode_to_vec();
+    Ok(encoded)
 }
 
 /// Deserialize a Raft message from bytes
 pub fn deserialize_message(data: &[u8]) -> Result<Message> {
-    postcard::from_bytes(data).map_err(|e| RaftError::Serialization {
+    // Use prost 0.11 for deserialization (raft uses prost-codec with 0.11)
+    use prost::Message as ProstMessage;
+    
+    Message::decode(data).map_err(|e| RaftError::Serialization {
+        backtrace: snafu::Backtrace::new(),
         message_type: "Message".to_string(),
         source: Box::new(e),
     })
@@ -411,15 +446,20 @@ pub fn deserialize_message(data: &[u8]) -> Result<Message> {
 
 /// Serialize a snapshot to bytes
 pub fn serialize_snapshot(snapshot: &Snapshot) -> Result<Vec<u8>> {
-    postcard::to_allocvec(snapshot).map_err(|e| RaftError::Serialization {
-        message_type: "Snapshot".to_string(),
-        source: Box::new(e),
-    })
+    // Use prost 0.11 for serialization (raft uses prost-codec with 0.11)
+    use prost::Message as ProstMessage;
+    
+    let encoded = snapshot.encode_to_vec();
+    Ok(encoded)
 }
 
 /// Deserialize a snapshot from bytes  
 pub fn deserialize_snapshot(data: &[u8]) -> Result<Snapshot> {
-    postcard::from_bytes(data).map_err(|e| RaftError::Serialization {
+    // Use prost 0.11 for deserialization (raft uses prost-codec with 0.11)
+    use prost::Message as ProstMessage;
+    
+    Snapshot::decode(data).map_err(|e| RaftError::Serialization {
+        backtrace: snafu::Backtrace::new(),
         message_type: "Snapshot".to_string(),
         source: Box::new(e),
     })

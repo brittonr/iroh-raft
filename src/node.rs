@@ -19,9 +19,12 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{interval, timeout};
 use tracing::{debug, error, info, instrument, warn};
 
-/// High-level interface for custom state machines
+/// High-level interface for custom state machines used by RaftNode
+/// 
+/// NOTE: This is different from the generic StateMachine trait in the raft module.
+/// This trait is specific to the RaftNode implementation and works with ProposalData.
 #[async_trait]
-pub trait StateMachine: Send + Sync + 'static {
+pub trait NodeStateMachine: Send + Sync + 'static {
     /// Apply a proposal to the state machine
     async fn apply(&mut self, index: u64, data: &ProposalData) -> Result<Vec<u8>>;
     
@@ -75,7 +78,7 @@ impl KeyValueStateMachine {
 }
 
 #[async_trait]
-impl StateMachine for KeyValueStateMachine {
+impl NodeStateMachine for KeyValueStateMachine {
     async fn apply(&mut self, _index: u64, data: &ProposalData) -> Result<Vec<u8>> {
         match data {
             ProposalData::KeyValue(op) => {
@@ -151,7 +154,7 @@ impl RaftNodeBuilder<KeyValueStateMachine> {
     }
 }
 
-impl<S: StateMachine> RaftNodeBuilder<S> {
+impl<S: NodeStateMachine> RaftNodeBuilder<S> {
     /// Create a builder with a custom state machine
     pub fn with_state_machine(config: NodeConfig, state_machine: S) -> RaftNodeBuilder<S> {
         RaftNodeBuilder {
@@ -171,7 +174,7 @@ impl<S: StateMachine> RaftNodeBuilder<S> {
 }
 
 /// Main Raft node that coordinates consensus, transport, and storage
-pub struct RaftNode<S: StateMachine> {
+pub struct RaftNode<S: NodeStateMachine> {
     /// Node configuration
     config: NodeConfig,
     
@@ -205,7 +208,7 @@ pub struct RaftNode<S: StateMachine> {
     shutdown_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
-impl<S: StateMachine> RaftNode<S> {
+impl<S: NodeStateMachine> RaftNode<S> {
     /// Create a new RaftNode with the given configuration and state machine
     pub async fn new(config: NodeConfig, state_machine: S) -> Result<Self> {
         // Validate configuration
@@ -519,7 +522,7 @@ impl<S: StateMachine> RaftNode<S> {
 
 // Helper struct for the background task
 #[derive(Clone)]
-struct RaftNodeHandle<S: StateMachine> {
+struct RaftNodeHandle<S: NodeStateMachine> {
     config: NodeConfig,
     raft: Arc<Mutex<RawNode<RaftStorage>>>,
     transport: Arc<IrohTransport>,
@@ -531,7 +534,7 @@ struct RaftNodeHandle<S: StateMachine> {
     shutdown_rx: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
-impl<S: StateMachine> RaftNodeHandle<S> {
+impl<S: NodeStateMachine> RaftNodeHandle<S> {
     async fn handle_tick(&self) -> Result<()> {
         let mut raft = self.raft.lock().await;
         raft.tick();
@@ -669,7 +672,7 @@ impl<S: StateMachine> RaftNodeHandle<S> {
     }
 }
 
-impl<S: StateMachine> std::fmt::Debug for RaftNode<S> {
+impl<S: NodeStateMachine> std::fmt::Debug for RaftNode<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RaftNode")
             .field("node_id", &self.config.id)

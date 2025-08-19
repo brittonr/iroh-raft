@@ -47,9 +47,13 @@ pub mod config;
 pub mod error;
 pub mod types;
 
-// Core modules - temporarily disabled due to compilation issues
-// pub mod storage;
-// pub mod transport;
+// Core modules
+pub mod storage;
+/// P2P transport implementations for Raft consensus
+/// 
+/// This module provides transport layers for Raft consensus communication
+/// over peer-to-peer networks, primarily using the Iroh networking stack.
+pub mod transport;
 
 // Other modules are under development and will be added incrementally
 // pub mod node;
@@ -76,12 +80,12 @@ pub use crate::types::{NodeId, ProposalData};
 // Re-export generic state machine components
 pub use crate::raft::{
     ExampleRaftStateMachine, GenericRaftStateMachine, KvCommand, KvState, KeyValueStore,
-    StateMachine, StateMachineResult,
+    StateMachine,
 };
 
-// Temporarily disabled until compilation issues are resolved
-// pub use crate::storage::RaftStorage;
-// pub use crate::transport::IrohTransport;
+// Core transport and storage exports
+pub use crate::storage::RaftStorage;
+pub use crate::transport::RaftProtocolHandler;
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -95,7 +99,7 @@ pub mod prelude {
     // Re-export generic state machine components
     pub use crate::raft::{
         ExampleRaftStateMachine, GenericRaftStateMachine, KvCommand, KvState, KeyValueStore,
-        StateMachine, StateMachineResult,
+        StateMachine,
     };
 
     // Re-export key Raft types
