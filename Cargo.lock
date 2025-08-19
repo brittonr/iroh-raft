@@ -1962,6 +1962,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "iroh",
+ "lazy_static",
  "madsim",
  "num_cpus",
  "once_cell",

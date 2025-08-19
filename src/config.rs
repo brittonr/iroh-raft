@@ -237,29 +237,82 @@ pub struct TransportConfig {
     pub iroh: IrohConfig,
 }
 
-/// Connection configuration
+/// Connection configuration for transport layer optimization
+/// 
+/// This configuration controls how the transport layer manages connections to peer nodes,
+/// including connection pooling, timeouts, and resource limits.
+/// 
+/// # Connection Pooling
+/// 
+/// When `enable_pooling` is true, the transport layer will maintain a pool of connections
+/// to each peer and reuse them for multiple messages. This reduces connection overhead
+/// and improves throughput, especially for high-frequency communications.
+/// 
+/// # Resource Limits
+/// 
+/// The configuration provides several knobs to control resource usage:
+/// - `max_connections_per_peer`: Limits memory and file descriptor usage
+/// - `max_message_size`: Prevents DoS attacks with oversized messages
+/// - `idle_timeout`: Automatically closes unused connections to free resources
+/// 
+/// # Example
+/// 
+/// ```rust
+/// use iroh_raft::config::ConnectionConfig;
+/// use std::time::Duration;
+/// 
+/// let connection_config = ConnectionConfig {
+///     enable_pooling: true,
+///     max_connections_per_peer: 5,
+///     connect_timeout: Duration::from_secs(10),
+///     keep_alive_interval: Duration::from_secs(30),
+///     idle_timeout: Duration::from_secs(300),
+///     max_message_size: 1024 * 1024, // 1MB
+/// };
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConnectionConfig {
-    /// Timeout for establishing connections
+    /// Timeout for establishing new connections to peers
+    /// 
+    /// If a connection attempt takes longer than this duration, it will be aborted
+    /// and retried later. Lower values detect failed peers faster but may cause
+    /// false positives on slow networks.
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
     
-    /// Keep-alive interval for connections
+    /// Interval for sending keep-alive messages on idle connections
+    /// 
+    /// Helps detect broken connections and maintain NAT traversal state.
+    /// Should be significantly shorter than `idle_timeout`.
     #[serde(with = "humantime_serde")]
     pub keep_alive_interval: Duration,
     
-    /// Maximum number of concurrent connections per peer
+    /// Maximum number of concurrent connections maintained per peer
+    /// 
+    /// When connection pooling is enabled, this limits the pool size per peer.
+    /// Higher values allow better parallelism but consume more resources.
+    /// Typical values: 1-10 depending on message volume.
     pub max_connections_per_peer: usize,
     
-    /// Connection idle timeout
+    /// Timeout for automatically closing idle connections
+    /// 
+    /// Connections with no activity for this duration will be closed to free
+    /// resources. Set to a high value if connections are expensive to establish.
     #[serde(with = "humantime_serde")]
     pub idle_timeout: Duration,
     
-    /// Maximum message size in bytes
+    /// Maximum allowed size for incoming messages in bytes
+    /// 
+    /// Protects against DoS attacks with oversized messages. Should be large
+    /// enough for legitimate Raft messages including snapshots.
     pub max_message_size: usize,
     
-    /// Enable connection pooling
+    /// Enable connection pooling for improved performance
+    /// 
+    /// When enabled, multiple messages to the same peer can reuse existing
+    /// connections, reducing connection setup overhead. Recommended for
+    /// production deployments with frequent message exchange.
     pub enable_pooling: bool,
 }
 

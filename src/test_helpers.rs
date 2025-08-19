@@ -46,6 +46,7 @@ use proptest::{collection::vec, prelude::*, string::string_regex};
 use tempfile::tempdir;
 
 use crate::{NodeId, ProposalData, Result};
+use snafu::Backtrace;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -94,6 +95,7 @@ impl TestCluster {
     pub async fn with_name(size: usize, name: &str) -> Result<Self> {
         if size == 0 {
             return Err(crate::error::RaftError::InvalidInput {
+                backtrace: Backtrace::new(),
                 parameter: "cluster_size".to_string(),
                 message: "cluster size must be at least 1".to_string(),
             });
@@ -160,6 +162,7 @@ impl TestCluster {
         Err(crate::error::RaftError::ProposalRejected {
             operation: "cluster_propose".to_string(),
             reason: "no node could accept the proposal".to_string(),
+                backtrace: Backtrace::new(),
         })
     }
 
@@ -182,6 +185,7 @@ impl TestCluster {
         Err(crate::error::RaftError::Timeout {
             operation: "wait_for_consensus".to_string(),
             duration: timeout_duration,
+            backtrace: Backtrace::new(),
         })
     }
 
@@ -237,6 +241,7 @@ impl TestCluster {
             node.stop().await
         } else {
             Err(crate::error::RaftError::InvalidInput {
+                backtrace: Backtrace::new(),
                 parameter: "node_index".to_string(),
                 message: format!("invalid node index: {}", index),
             })
@@ -249,6 +254,7 @@ impl TestCluster {
             node.restart().await
         } else {
             Err(crate::error::RaftError::InvalidInput {
+                backtrace: Backtrace::new(),
                 parameter: "node_index".to_string(),
                 message: format!("invalid node index: {}", index),
             })
@@ -271,7 +277,7 @@ impl TestCluster {
     /// Remove a node from the cluster
     pub async fn remove_node(&mut self, node_id: NodeId) -> Result<()> {
         let position = self.nodes.iter().position(|n| n.id() == node_id)
-            .ok_or_else(|| crate::error::RaftError::NodeNotFound { node_id })?;
+            .ok_or_else(|| crate::error::RaftError::NodeNotFound { node_id, backtrace: Backtrace::new(), })?;
 
         let mut node = self.nodes.remove(position);
         node.stop().await?;
@@ -361,12 +367,14 @@ impl TestNode {
                 node_id: self.id,
                 operation: "propose".to_string(),
                 reason: "node is not running".to_string(),
+                backtrace: Backtrace::new(),
             });
         }
 
         if self.is_isolated {
             return Err(crate::error::RaftError::NetworkPartition {
                 details: "node is network isolated".to_string(),
+                backtrace: Backtrace::new(),
             });
         }
 
@@ -375,6 +383,7 @@ impl TestNode {
             .map_err(|_| crate::error::RaftError::LockPoisoned {
                 operation: "propose".to_string(),
                 details: "committed_entries lock poisoned".to_string(),
+                backtrace: Backtrace::new(),
             })?;
         
         entries.push(data);
@@ -387,6 +396,7 @@ impl TestNode {
             .map_err(|_| crate::error::RaftError::LockPoisoned {
                 operation: "get_committed_state".to_string(),
                 details: "committed_entries lock poisoned".to_string(),
+                backtrace: Backtrace::new(),
             })?;
         
         Ok(entries.clone())
@@ -405,6 +415,7 @@ impl TestNode {
             .map_err(|_| crate::error::RaftError::LockPoisoned {
                 operation: "stop".to_string(),
                 details: "is_leader lock poisoned".to_string(),
+                backtrace: Backtrace::new(),
             })? = false;
         Ok(())
     }
@@ -442,6 +453,7 @@ impl TestNode {
             .map_err(|_| crate::error::RaftError::LockPoisoned {
                 operation: "become_leader".to_string(),
                 details: "is_leader lock poisoned".to_string(),
+                backtrace: Backtrace::new(),
             })? = true;
         Ok(())
     }
@@ -452,6 +464,7 @@ impl TestNode {
             .map_err(|_| crate::error::RaftError::LockPoisoned {
                 operation: "step_down".to_string(),
                 details: "is_leader lock poisoned".to_string(),
+                backtrace: Backtrace::new(),
             })? = false;
         Ok(())
     }
@@ -509,6 +522,7 @@ impl TempDir {
             .map_err(|e| crate::error::RaftError::Io {
                 operation: "create_temp_dir".to_string(),
                 source: e,
+                backtrace: Backtrace::new(),
             })?;
         
         let path = tempdir.path().join(prefix);
@@ -516,6 +530,7 @@ impl TempDir {
             .map_err(|e| crate::error::RaftError::Io {
                 operation: "create_temp_subdir".to_string(),
                 source: e,
+                backtrace: Backtrace::new(),
             })?;
 
         Ok(Self {
@@ -541,6 +556,7 @@ impl TempDir {
             .map_err(|e| crate::error::RaftError::Io {
                 operation: "create_temp_dir".to_string(),
                 source: e,
+                backtrace: Backtrace::new(),
             })?;
 
         Ok(Self { path })
@@ -558,6 +574,7 @@ impl TempDir {
             .map_err(|e| crate::error::RaftError::Io {
                 operation: "create_subdir".to_string(),
                 source: e,
+                backtrace: Backtrace::new(),
             })?;
         Ok(subdir)
     }
@@ -769,6 +786,7 @@ pub mod execution {
             Err(_) => Err(crate::error::RaftError::Timeout {
                 operation: format!("test_{}", test_name),
                 duration: timeout_duration,
+                backtrace: Backtrace::new(),
             }),
         }
     }
@@ -801,6 +819,7 @@ pub mod execution {
                     return Err(crate::error::RaftError::System {
                         operation: format!("concurrent_test_{}_{}", test_name, i),
                         details: format!("task join error: {}", join_err),
+                        backtrace: Backtrace::new(),
                     });
                 }
             }

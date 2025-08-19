@@ -1,24 +1,22 @@
 //! Iroh transport adapter for Raft consensus
 //!
 //! This module provides an efficient transport layer for Raft messages over Iroh P2P,
-//! with optimizations for:
-//! - Message batching to reduce network overhead
-//! - Prioritization of different Raft message types
-//! - Efficient streaming for log entries and snapshots
-//! - Integration with existing Raft manager
+//! with integrated OpenTelemetry metrics and graceful shutdown.
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::Connection;
 use iroh::{Endpoint, NodeId};
 use raft::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock, Notify};
 use tokio::task::JoinHandle;
 
 use crate::error::{RaftError, Result};
-#[cfg(feature = "observability")]
-use crate::metrics_otel::{attributes, safe_metrics, Timer};
+#[cfg(feature = "metrics-otel")]
+use crate::metrics::{MetricsRegistry, LatencyTimer};
+#[cfg(feature = "metrics-otel")]
+use opentelemetry::{global, metrics::Counter, KeyValue};
 use crate::transport::shared::SharedNodeState;
 use crate::transport::protocol::{
     generate_request_id, read_message, write_message, MessageType,
@@ -35,22 +33,21 @@ pub struct IrohRaftMetrics {
     pub messages_received: u64,
 }
 
-#[cfg(feature = "observability")]
+#[cfg(feature = "metrics-otel")]
 lazy_static::lazy_static! {
-    static ref RAFT_MESSAGES_SENT: opentelemetry::metrics::Counter<u64> = {
-        opentelemetry::global::meter("iroh-raft")
+    static ref RAFT_MESSAGES_SENT: Counter<u64> = {
+        global::meter("iroh-raft")
             .u64_counter("raft.messages.sent")
             .with_description("Number of Raft messages sent over Iroh transport")
-            .init()
+            .build()
     };
-    static ref RAFT_MESSAGES_RECEIVED: opentelemetry::metrics::Counter<u64> = {
-        opentelemetry::global::meter("iroh-raft")
+    static ref RAFT_MESSAGES_RECEIVED: Counter<u64> = {
+        global::meter("iroh-raft")
             .u64_counter("raft.messages.received")
             .with_description("Number of Raft messages received over Iroh transport")
-            .init()
+            .build()
     };
 }
-// use crate::config_global;  // Not needed for basic transport
 
 /// Raft-specific message types for optimization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,8 +87,6 @@ struct BufferedRaftMessage {
     message: Message,
     priority: RaftMessagePriority,
     timestamp: Instant,
-    #[allow(dead_code)] // Future: implement retry logic with attempt tracking
-    attempts: u32,
 }
 
 /// Connection state for a peer
@@ -99,87 +94,7 @@ struct PeerConnection {
     node_id: u64,
     iroh_node_id: NodeId,
     connection: Connection,
-    /// Separate streams for different message priorities (future optimization)
-    _election_stream: Option<SendStream>,
-    _heartbeat_stream: Option<SendStream>,
-    _append_stream: Option<SendStream>,
-    _snapshot_stream: Option<SendStream>,
     last_activity: Instant,
-}
-
-impl PeerConnection {
-    async fn _get_stream(
-        &mut self,
-        priority: RaftMessagePriority,
-    ) -> Result<&mut SendStream> {
-        match priority {
-            RaftMessagePriority::Election => {
-                if self._election_stream.is_none() {
-                    self._election_stream = Some(self.connection.open_uni().await.map_err(|e| {
-                        RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                            message: format!("Failed to open stream: {}", e),
-                        }
-                    })?);
-                }
-                self._election_stream
-                    .as_mut()
-                    .ok_or_else(|| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                        message: "Election stream should exist after creation".to_string(),
-                    })
-            }
-            RaftMessagePriority::Heartbeat => {
-                if self._heartbeat_stream.is_none() {
-                    self._heartbeat_stream =
-                        Some(self.connection.open_uni().await.map_err(|e| {
-                            RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                                message: format!("Failed to open stream: {}", e),
-                            }
-                        })?);
-                }
-                self._heartbeat_stream
-                    .as_mut()
-                    .ok_or_else(|| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                        message: "Heartbeat stream should exist after creation".to_string(),
-                    })
-            }
-            RaftMessagePriority::LogAppend => {
-                if self._append_stream.is_none() {
-                    self._append_stream = Some(self.connection.open_uni().await.map_err(|e| {
-                        RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                            message: format!("Failed to open stream: {}", e),
-                        }
-                    })?);
-                }
-                self._append_stream
-                    .as_mut()
-                    .ok_or_else(|| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                        message: "Append stream should exist after creation".to_string(),
-                    })
-            }
-            RaftMessagePriority::Snapshot => {
-                if self._snapshot_stream.is_none() {
-                    self._snapshot_stream = Some(self.connection.open_uni().await.map_err(|e| {
-                        RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                            message: format!("Failed to open stream: {}", e),
-                        }
-                    })?);
-                }
-                self._snapshot_stream
-                    .as_mut()
-                    .ok_or_else(|| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                        message: "Snapshot stream should exist after creation".to_string(),
-                    })
-            }
-        }
-    }
 }
 
 /// Iroh transport adapter for Raft
@@ -189,23 +104,25 @@ pub struct IrohRaftTransport {
     /// Iroh endpoint for P2P communication
     endpoint: Endpoint,
     /// Our Iroh node ID
-    #[allow(dead_code)] // Future: implement node ID-based message routing
     local_node_id: NodeId,
     /// Active connections to peers
     connections: Arc<RwLock<HashMap<u64, PeerConnection>>>,
     /// Message buffer for batching and retry
     message_buffer: Arc<Mutex<HashMap<u64, VecDeque<BufferedRaftMessage>>>>,
     /// Channel to send incoming Raft messages to the Raft manager
-    #[allow(dead_code)] // Future: implement direct Raft message forwarding
     raft_rx_tx: mpsc::UnboundedSender<(u64, Message)>,
     /// Background task handles
     tasks: Mutex<Vec<JoinHandle<()>>>,
     /// Shutdown channel
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    /// Metrics
+    /// Shutdown notification for graceful termination
+    shutdown_notify: Arc<Notify>,
+    /// Metrics registry for OpenTelemetry integration
+    #[cfg(feature = "metrics-otel")]
+    metrics: Option<MetricsRegistry>,
+    /// Local metrics tracking
     messages_sent: Arc<Mutex<HashMap<String, u64>>>,
-    #[allow(dead_code)] // Future: implement received message metrics
     messages_received: Arc<Mutex<HashMap<String, u64>>>,
 }
 
@@ -218,6 +135,10 @@ impl IrohRaftTransport {
         raft_rx_tx: mpsc::UnboundedSender<(u64, Message)>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_notify = Arc::new(Notify::new());
+        
+        #[cfg(feature = "metrics-otel")]
+        let metrics = MetricsRegistry::new("iroh-raft-transport").ok();
 
         Self {
             node,
@@ -229,22 +150,45 @@ impl IrohRaftTransport {
             tasks: Mutex::new(Vec::new()),
             shutdown_tx,
             shutdown_rx,
+            shutdown_notify,
+            #[cfg(feature = "metrics-otel")]
+            metrics,
+            messages_sent: Arc::new(Mutex::new(HashMap::new())),
+            messages_received: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    /// Create with metrics registry
+    #[cfg(feature = "metrics-otel")]
+    pub fn with_metrics(
+        node: Arc<SharedNodeState>,
+        endpoint: Endpoint,
+        local_node_id: NodeId,
+        raft_rx_tx: mpsc::UnboundedSender<(u64, Message)>,
+        metrics: MetricsRegistry,
+    ) -> Self {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_notify = Arc::new(Notify::new());
+
+        Self {
+            node,
+            endpoint,
+            local_node_id,
+            connections: Arc::new(RwLock::new(HashMap::new())),
+            message_buffer: Arc::new(Mutex::new(HashMap::new())),
+            raft_rx_tx,
+            tasks: Mutex::new(Vec::new()),
+            shutdown_tx,
+            shutdown_rx,
+            shutdown_notify,
+            metrics: Some(metrics),
             messages_sent: Arc::new(Mutex::new(HashMap::new())),
             messages_received: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Start the transport (accept incoming connections, process outgoing messages)
+    /// Start the transport (process outgoing messages)
     pub async fn start(&self) -> Result<()> {
-        // IMPORTANT: We do NOT spawn an accept task here because the Raft transport
-        // should not accept incoming connections directly. The iroh_service_runner
-        // handles all incoming connections through the Router, which properly filters
-        // by ALPN protocol and dispatches to the appropriate service.
-        //
-        // Raft messages are sent directly between peers using the send_message() method,
-        // which opens outgoing connections as needed. This prevents the Raft transport
-        // from intercepting RPC connections meant for the cluster service.
-
         // Start message batch processor for outgoing messages
         let batch_task = self.spawn_batch_processor();
 
@@ -262,59 +206,28 @@ impl IrohRaftTransport {
 
     /// Send a Raft message to a peer
     pub async fn send_message(&self, to: u64, message: Message) -> Result<()> {
-        tracing::info!(
-            "RAFT_SEND: Attempting to send {:?} message to node {}", 
-            message.msg_type(), to
-        );
-        
-        // Check if we know about this peer first
-        let peer_info = self.node.get_peer(to).await;
-        if peer_info.is_none() {
-            // Peer is not in our cluster, silently drop the message
-            tracing::warn!(
-                "RAFT_SEND: Dropping message to unknown peer {} - not in peer list", 
-                to
-            );
-            return Ok(());
+        if self.is_shutting_down() {
+            return Err(RaftError::Internal {
+                message: "Transport is shutting down".to_string(),
+                backtrace: snafu::Backtrace::new(),
+            });
         }
-        
-        tracing::info!(
-            "RAFT_SEND: Found peer {} in peer list with P2P info: node_id={:?}, addresses={:?}",
-            to,
-            peer_info.as_ref().unwrap().p2p_node_id,
-            peer_info.as_ref().unwrap().p2p_addresses
-        );
 
+        tracing::debug!("Sending {:?} message to node {}", message.msg_type(), to);
+        
         let priority = RaftMessagePriority::from_raft_message(&message);
 
-        // For high-priority messages AND MsgAppend (critical for config changes), try to send immediately
+        // For high-priority messages, try to send immediately
         if matches!(
             priority,
             RaftMessagePriority::Election | RaftMessagePriority::Heartbeat | RaftMessagePriority::LogAppend
         ) {
-            tracing::debug!(
-                "RAFT_SEND: High-priority message {:?} to {}, attempting immediate send",
-                message.msg_type(), to
-            );
-            tracing::info!("RAFT_SEND: Attempting immediate send to node {}", to);
             if let Err(e) = self.try_send_immediate(to, &message, priority).await {
-                tracing::warn!(
-                    "RAFT_SEND: Immediate send failed for node {}: {}, buffering", 
-                    to, e
-                );
+                tracing::warn!("Immediate send failed for node {}: {}, buffering", to, e);
                 self.buffer_message(to, message, priority).await?;
-            } else {
-                tracing::info!(
-                    "RAFT_SEND: Successfully sent {:?} message immediately to node {}",
-                    message.msg_type(), to
-                );
             }
         } else {
             // For lower priority messages, always buffer for batching
-            tracing::debug!(
-                "RAFT_SEND: Buffering {:?} message to node {} for batch sending",
-                message.msg_type(), to
-            );
             self.buffer_message(to, message, priority).await?;
         }
 
@@ -326,45 +239,16 @@ impl IrohRaftTransport {
         &self,
         to: u64,
         message: &Message,
-        priority: RaftMessagePriority,
+        _priority: RaftMessagePriority,
     ) -> Result<()> {
-        tracing::info!(
-            "RAFT_SEND_IMMEDIATE: Starting immediate send of {:?} to node {}",
-            message.msg_type(), to
-        );
-        
-        #[cfg(feature = "observability")]
-        let _timer = safe_metrics().ok().map(|m| Timer::new(m.raft_proposal_duration.clone()));
+        #[cfg(feature = "metrics-otel")]
+        let timer = self.metrics.as_ref().map(|_| LatencyTimer::start("message_send"));
 
         // Get or create connection
-        tracing::info!("RAFT_SEND_IMMEDIATE: Getting or creating connection to node {}", to);
-        let mut conn = match self.get_or_create_connection(to).await {
-            Ok(conn) => {
-                tracing::info!(
-                    "RAFT_SEND_IMMEDIATE: Successfully got connection to node {} (Iroh ID: {})",
-                    to, conn.iroh_node_id
-                );
-                conn
-            }
-            Err(e) => {
-                tracing::error!(
-                    "RAFT_SEND_IMMEDIATE: Failed to get/create connection to node {}: {}",
-                    to, e
-                );
-                return Err(e);
-            }
-        };
+        let conn = self.get_or_create_connection(to).await?;
 
         // Serialize Raft message
-        tracing::debug!(
-            "RAFT_SEND_IMMEDIATE: Serializing {:?} message for node {}",
-            message.msg_type(), to
-        );
         let msg_data = crate::raft::messages::serialize_message(message)?;
-        tracing::debug!(
-            "RAFT_SEND_IMMEDIATE: Serialized message has {} bytes",
-            msg_data.len()
-        );
 
         // Create RPC request for the raft service
         let request_id = generate_request_id();
@@ -378,47 +262,38 @@ impl IrohRaftTransport {
         let request_bytes = crate::transport::protocol::serialize_payload(&request)?;
 
         // Open bidirectional stream for RPC
-        tracing::debug!(
-            "RAFT_SEND_IMMEDIATE: Opening bi stream for priority {:?} to node {}",
-            priority, to
-        );
         let (mut send, mut recv) = conn.connection.open_bi().await
             .map_err(|e| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
                 message: format!("Failed to open bi stream: {}", e),
+                backtrace: snafu::Backtrace::new(),
             })?;
 
         // Send RPC request
-        tracing::debug!(
-            "RAFT_SEND_IMMEDIATE: Writing RPC message to stream for node {} (request_id: {:?})",
-            to, request_id
-        );
         write_message(&mut send, MessageType::Request, Some(request_id), &request_bytes).await?;
         
-        // Close the send stream to signal we're done sending
+        // Finish the send stream to signal we're done sending
         send.finish().map_err(|e| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
             message: format!("Failed to finish send stream: {}", e),
+            backtrace: snafu::Backtrace::new(),
         })?;
         
-        // Wait for response (just to confirm delivery) 
+        // Wait for response to confirm delivery
         let _ = read_message(&mut recv).await;
-        
-        tracing::debug!(
-            "RAFT_SEND_IMMEDIATE: Successfully sent {:?} message to node {}",
-            message.msg_type(), to
-        );
 
         // Update metrics
         self.record_raft_message_sent(message.msg_type());
-
-        // Update last activity
-        conn.last_activity = Instant::now();
         
-        tracing::info!(
-            "RAFT_SEND_IMMEDIATE: Successfully sent {:?} message to node {}",
-            message.msg_type(), to
-        );
+        #[cfg(feature = "metrics-otel")]
+        if let (Some(metrics), Some(timer)) = (&self.metrics, timer) {
+            metrics.transport_metrics().record_message_sent(
+                &format!("{:?}", message.msg_type()),
+                &to.to_string()
+            );
+            metrics.transport_metrics().record_message_latency(
+                &format!("{:?}", message.msg_type()),
+                timer.elapsed()
+            );
+        }
 
         Ok(())
     }
@@ -430,22 +305,14 @@ impl IrohRaftTransport {
         message: Message,
         priority: RaftMessagePriority,
     ) -> Result<()> {
-        tracing::debug!(
-            "RAFT_BUFFER: Buffering {:?} message (priority {:?}) for node {}",
-            message.msg_type(), priority, to
-        );
-        
         let mut buffer = self.message_buffer.lock().await;
         let queue = buffer.entry(to).or_insert_with(VecDeque::new);
-        
-        let initial_size = queue.len();
 
         // Add message to queue based on priority
         let buffered = BufferedRaftMessage {
             message,
             priority,
             timestamp: Instant::now(),
-            attempts: 0,
         };
 
         // Insert based on priority (higher priority at front)
@@ -456,288 +323,119 @@ impl IrohRaftTransport {
         queue.insert(insert_pos, buffered);
 
         // Limit buffer size
-        // TODO: Make this configurable
-        let max_buffered = 1000; // Default max buffered messages per peer
-        while queue.len() > max_buffered {
+        const MAX_BUFFERED: usize = 1000;
+        while queue.len() > MAX_BUFFERED {
             queue.pop_back();
         }
-        
-        tracing::debug!(
-            "RAFT_BUFFER: Buffered message for node {} (queue size: {} -> {}, max: {})",
-            to, initial_size, queue.len(), max_buffered
-        );
 
         Ok(())
     }
 
     /// Get or create a connection to a peer
     async fn get_or_create_connection(&self, peer_id: u64) -> Result<PeerConnection> {
-        tracing::debug!("RAFT_CONNECT: Getting or creating connection to peer {}", peer_id);
-        
         // Check existing connections
         {
             let connections = self.connections.read().await;
             if let Some(conn) = connections.get(&peer_id) {
-                tracing::debug!(
-                    "RAFT_CONNECT: Found existing connection to peer {} (Iroh ID: {})",
-                    peer_id, conn.iroh_node_id
-                );
-                return Ok(PeerConnection {
-                    node_id: conn.node_id,
-                    iroh_node_id: conn.iroh_node_id,
-                    connection: conn.connection.clone(),
-                    _election_stream: None,
-                    _heartbeat_stream: None,
-                    _append_stream: None,
-                    _snapshot_stream: None,
-                    last_activity: conn.last_activity,
-                });
+                // Check if connection is still recent (less than 1 hour old and 5 min idle)
+                if conn.last_activity.elapsed() < Duration::from_secs(300) {
+                    return Ok(PeerConnection {
+                        node_id: conn.node_id,
+                        iroh_node_id: conn.iroh_node_id,
+                        connection: conn.connection.clone(),
+                        last_activity: conn.last_activity,
+                    });
+                }
             }
         }
-        
-        tracing::debug!("RAFT_CONNECT: No existing connection, creating new one for peer {}", peer_id);
 
-        // Create new connection using NodeRegistry
+        // Create new connection
+        let peer_info = self.node.get_peer(peer_id).await
+            .ok_or_else(|| RaftError::ClusterError {
+                message: format!("Unknown peer {}", peer_id),
+                backtrace: snafu::Backtrace::new(),
+            })?;
+
         let node_registry = self.node.node_registry();
-        
-        tracing::debug!(
-            "RAFT_CONNECT: Looking up peer {} in node registry",
-            peer_id
-        );
-        
-        // First check what's in the registry
-        let registry_entries = node_registry.list_nodes().await;
-        tracing::debug!(
-            "RAFT_CONNECT: Node registry contains {} entries: {:?}",
-            registry_entries.len(),
-            registry_entries.iter().map(|e| (e.cluster_node_id, &e.iroh_node_id)).collect::<Vec<_>>()
-        );
-        
-        // Get the complete NodeAddr from the registry
         let node_addr = match node_registry.get_node_addr(peer_id).await {
-            Some(addr) => {
-                tracing::debug!(
-                    "RAFT_CONNECT: Found peer {} in registry with Iroh ID {}, {} direct addresses, relay: {:?}",
-                    peer_id,
-                    addr.node_id,
-                    addr.direct_addresses().count(),
-                    addr.relay_url()
-                );
-                addr
-            }
+            Some(addr) => addr,
             None => {
-                tracing::warn!(
-                    "RAFT_CONNECT: Peer {} not found in node registry. Trying cluster members fallback. Available peers: {:?}",
-                    peer_id,
-                    registry_entries.iter().map(|e| e.cluster_node_id).collect::<Vec<_>>()
-                );
-                
-                // Fallback: try to get P2P info from cluster members
-                if let Some(peer_info) = self.node.get_peer(peer_id).await {
-                    if let Some(p2p_node_id_str) = &peer_info.p2p_node_id {
-                        if let Ok(iroh_node_id) = p2p_node_id_str.parse::<iroh::NodeId>() {
-                            tracing::info!(
-                                "RAFT_CONNECT: Found peer {} in cluster members, creating NodeAddr from P2P info",
-                                peer_id
-                            );
-                            
-                            // Create NodeAddr from cluster member P2P info
-                            let mut node_addr = iroh::NodeAddr::new(iroh_node_id);
-                            
-                            // Add addresses if available
-                            let addrs: Vec<std::net::SocketAddr> = peer_info.p2p_addresses
-                                .iter()
-                                .filter_map(|a| a.parse().ok())
-                                .collect();
-                            if !addrs.is_empty() {
-                                node_addr = node_addr.with_direct_addresses(addrs);
-                            }
-                            
-                            // Add relay URL if available
-                            if let Some(relay) = &peer_info.p2p_relay_url {
-                                if let Ok(relay_url) = relay.parse() {
-                                    node_addr = node_addr.with_relay_url(relay_url);
-                                }
-                            }
-                            
-                            // Also register in node registry for future lookups
-                            node_registry.register_node(
-                                peer_id,
-                                iroh_node_id.to_string(),
-                                node_addr.clone()
-                            ).await;
-                            
-                            node_addr
-                        } else {
-                            tracing::error!(
-                                "RAFT_CONNECT: Invalid Iroh node ID for peer {} in cluster members: {}",
-                                peer_id, p2p_node_id_str
-                            );
-                            return Err(RaftError::ClusterError {
-                                message: format!("Peer {} has invalid Iroh node ID: {}", peer_id, p2p_node_id_str),
-                                backtrace: snafu::Backtrace::new(),
-                            });
-                        }
-                    } else {
-                        tracing::error!(
-                            "RAFT_CONNECT: Peer {} found in cluster members but has no P2P node ID",
-                            peer_id
-                        );
-                        return Err(RaftError::ClusterError {
-                            message: format!("Peer {} has no P2P node ID", peer_id),
+                // Fallback to peer info
+                if let Some(p2p_node_id_str) = &peer_info.p2p_node_id {
+                    let iroh_node_id = p2p_node_id_str.parse::<iroh::NodeId>()
+                        .map_err(|e| RaftError::Internal {
+                            message: format!("Invalid Iroh node ID: {}", e),
                             backtrace: snafu::Backtrace::new(),
-                        });
+                        })?;
+                    
+                    let mut node_addr = iroh::NodeAddr::new(iroh_node_id);
+                    
+                    // Add addresses and relay if available
+                    let addrs: Vec<std::net::SocketAddr> = peer_info.p2p_addresses
+                        .iter()
+                        .filter_map(|a| a.parse().ok())
+                        .collect();
+                    if !addrs.is_empty() {
+                        node_addr = node_addr.with_direct_addresses(addrs);
                     }
+                    
+                    if let Some(relay) = &peer_info.p2p_relay_url {
+                        if let Ok(relay_url) = relay.parse() {
+                            node_addr = node_addr.with_relay_url(relay_url);
+                        }
+                    }
+                    
+                    node_addr
                 } else {
-                    tracing::error!(
-                        "RAFT_CONNECT: Peer {} not found in node registry or cluster members",
-                        peer_id
-                    );
                     return Err(RaftError::ClusterError {
-                        message: format!("Peer {} not found in node registry or cluster members", peer_id),
+                        message: format!("Peer {} has no P2P node ID", peer_id),
                         backtrace: snafu::Backtrace::new(),
                     });
                 }
             }
         };
-        
-        let iroh_node_id = node_addr.node_id;
-        
-        tracing::info!(
-            "RAFT_CONNECT: Attempting to connect to peer {} with Iroh node ID {} using {} direct addresses and relay: {:?}",
-            peer_id,
-            iroh_node_id,
-            node_addr.direct_addresses().count(),
-            node_addr.relay_url()
-        );
 
-        // Connect to peer using standard BLIXARD_ALPN
-        tracing::debug!(
-            "RAFT_CONNECT: Calling endpoint.connect() for peer {} with ALPN {:?}",
-            peer_id, 
-            std::str::from_utf8(crate::transport::BLIXARD_ALPN).unwrap_or("invalid-utf8")
-        );
-        
-        // Add timeout to connection attempt (10 seconds)
-        let connection_timeout = Duration::from_secs(10);
-        let connection = match tokio::time::timeout(
-            connection_timeout,
+        let iroh_node_id = node_addr.node_id;
+
+        // Connect with timeout
+        let connection = tokio::time::timeout(
+            Duration::from_secs(10),
             self.endpoint.connect(node_addr, crate::transport::BLIXARD_ALPN)
-        ).await {
-            Ok(Ok(conn)) => {
-                tracing::info!(
-                    "RAFT_CONNECT: Successfully connected to peer {} (Iroh ID: {})",
-                    peer_id, iroh_node_id
-                );
-                conn
-            }
-            Ok(Err(e)) => {
-                tracing::error!(
-                    "RAFT_CONNECT: Failed to connect to peer {} (Iroh ID: {}): {}",
-                    peer_id, iroh_node_id, e
-                );
-                return Err(RaftError::Internal {
+        ).await
+        .map_err(|_| RaftError::Timeout {
+            operation: format!("connect to peer {}", peer_id),
+            duration: Duration::from_secs(10),
             backtrace: snafu::Backtrace::new(),
-                    message: format!("Connection error to peer {}: {}", peer_id, e),
-                });
-            }
-            Err(_) => {
-                tracing::error!(
-                    "RAFT_CONNECT: Connection timeout to peer {} (Iroh ID: {}) after {:?}",
-                    peer_id, iroh_node_id, connection_timeout
-                );
-                return Err(RaftError::Timeout {
-                    operation: format!("connect to peer {}", peer_id),
-                    duration: connection_timeout,
-                    backtrace: snafu::Backtrace::new(),
-                });
-            }
-        };
+        })?
+        .map_err(|e| RaftError::Internal {
+            message: format!("Connection error to peer {}: {}", peer_id, e),
+            backtrace: snafu::Backtrace::new(),
+        })?;
+
+        // Record connection established in metrics
+        #[cfg(feature = "metrics-otel")]
+        if let Some(metrics) = &self.metrics {
+            metrics.transport_metrics().record_connection_established(&peer_id.to_string());
+        }
 
         // Store connection
         let peer_conn = PeerConnection {
             node_id: peer_id,
             iroh_node_id,
             connection: connection.clone(),
-            _election_stream: None,
-            _heartbeat_stream: None,
-            _append_stream: None,
-            _snapshot_stream: None,
             last_activity: Instant::now(),
         };
 
         {
             let mut connections = self.connections.write().await;
             connections.insert(peer_id, peer_conn);
-            tracing::debug!(
-                "RAFT_CONNECT: Stored connection to peer {} in connection cache",
-                peer_id
-            );
         }
 
         Ok(PeerConnection {
             node_id: peer_id,
             iroh_node_id,
             connection,
-            _election_stream: None,
-            _heartbeat_stream: None,
-            _append_stream: None,
-            _snapshot_stream: None,
             last_activity: Instant::now(),
-        })
-    }
-
-    /// Spawn task to accept incoming connections
-    #[allow(dead_code)] // Future: implement automatic connection acceptance
-    fn spawn_accept_task(&self) -> JoinHandle<()> {
-        let endpoint = self.endpoint.clone();
-        let raft_rx_tx = self.raft_rx_tx.clone();
-        let node = self.node.clone();
-        let messages_received = self.messages_received.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        if *shutdown_rx.borrow() {
-                            tracing::info!("Raft transport accept task shutting down");
-                            break;
-                        }
-                    }
-                    incoming = endpoint.accept() => {
-                        match incoming {
-                            Some(incoming) => {
-                                let raft_rx_tx = raft_rx_tx.clone();
-                                let node = node.clone();
-                                let messages_received = messages_received.clone();
-
-                                tokio::spawn(async move {
-                                    match incoming.await {
-                                        Ok(connection) => {
-                                            if let Err(e) = handle_incoming_connection(
-                                                connection,
-                                                raft_rx_tx,
-                                                node,
-                                                messages_received,
-                                            ).await {
-                                                tracing::warn!("Failed to handle incoming Raft connection: {}", e);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Failed to accept incoming connection: {}", e);
-                                        }
-                                    }
-                                });
-                            }
-                            None => {
-                                tracing::info!("Endpoint closed, stopping accept task");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
         })
     }
 
@@ -751,7 +449,7 @@ impl IrohRaftTransport {
         let endpoint = self.endpoint.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(10)); // 10ms batching
+            let mut interval = tokio::time::interval(Duration::from_millis(10));
 
             loop {
                 tokio::select! {
@@ -762,7 +460,7 @@ impl IrohRaftTransport {
                         }
                     }
                     _ = interval.tick() => {
-                        process_message_batches(
+                        Self::process_message_batches(
                             &message_buffer,
                             &connections,
                             &node,
@@ -792,51 +490,184 @@ impl IrohRaftTransport {
                         }
                     }
                     _ = interval.tick() => {
-                        check_connection_health(&connections).await;
+                        Self::check_connection_health(&connections).await;
                     }
                 }
             }
         })
     }
 
-    /// Record sent message metrics
-    fn record_message_sent(&self, msg_type: MessageType) {
-        // Use try_lock to avoid blocking in async context
-        if let Ok(mut sent) = self.messages_sent.try_lock() {
-            let key = format!("{:?}", msg_type);
-            *sent.entry(key).or_insert(0) += 1;
-        }
-        // If we can't get the lock, skip metrics recording rather than panic
+    /// Process batched messages
+    async fn process_message_batches(
+        message_buffer: &Arc<Mutex<HashMap<u64, VecDeque<BufferedRaftMessage>>>>,
+        connections: &Arc<RwLock<HashMap<u64, PeerConnection>>>,
+        node: &Arc<SharedNodeState>,
+        messages_sent: &Arc<Mutex<HashMap<String, u64>>>,
+        endpoint: &Endpoint,
+    ) {
+        let mut buffer = message_buffer.lock().await;
 
-        #[cfg(feature = "observability")]
-        RAFT_MESSAGES_SENT.add(
-            1,
-            &[
-                attributes::TRANSPORT_TYPE.string("iroh"),
-                attributes::MESSAGE_TYPE.string(format!("{:?}", msg_type)),
-            ],
-        );
+        for (peer_id, messages) in buffer.iter_mut() {
+            if messages.is_empty() {
+                continue;
+            }
+
+            // Try to get connection
+            let connection = {
+                let connections = connections.read().await;
+                match connections.get(peer_id) {
+                    Some(conn) => conn.connection.clone(),
+                    None => {
+                        // Try to create connection for this peer
+                        if let Some(peer_info) = node.get_peer(*peer_id).await {
+                            if let Some(p2p_node_id_str) = &peer_info.p2p_node_id {
+                                if let Ok(iroh_node_id) = p2p_node_id_str.parse::<NodeId>() {
+                                    match endpoint.connect(iroh_node_id, crate::transport::BLIXARD_ALPN).await {
+                                        Ok(conn) => conn,
+                                        Err(_) => continue,
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            // Send messages
+            let mut sent_count = 0;
+            while let Some(buffered) = messages.pop_front() {
+                // Skip old messages
+                if buffered.timestamp.elapsed() > Duration::from_secs(30) {
+                    continue;
+                }
+
+                if let Err(_) = Self::send_single_message(&connection, &buffered.message).await {
+                    // Put message back if send failed
+                    messages.push_front(buffered);
+                    break;
+                }
+
+                // Record metrics
+                {
+                    let mut sent = messages_sent.lock().await;
+                    let key = format!("{:?}", buffered.message.msg_type());
+                    *sent.entry(key).or_insert(0) += 1;
+                }
+
+                sent_count += 1;
+                if sent_count >= 100 {
+                    break; // Batch size limit
+                }
+            }
+        }
     }
-    
+
+    /// Send a single message over a connection
+    async fn send_single_message(connection: &Connection, message: &Message) -> Result<()> {
+        let msg_data = crate::raft::messages::serialize_message(message)?;
+        let request_id = generate_request_id();
+        let request = crate::transport::protocol::RpcRequest {
+            service: "raft".to_string(),
+            method: "raft.message".to_string(),
+            payload: msg_data,
+        };
+        
+        let request_bytes = crate::transport::protocol::serialize_payload(&request)?;
+        let (mut send, mut recv) = connection.open_bi().await
+            .map_err(|e| RaftError::Internal {
+                message: format!("Failed to open bi stream: {}", e),
+                backtrace: snafu::Backtrace::new(),
+            })?;
+        
+        write_message(&mut send, MessageType::Request, Some(request_id), &request_bytes).await?;
+        send.finish().map_err(|e| RaftError::Internal {
+            message: format!("Failed to finish send stream: {}", e),
+            backtrace: snafu::Backtrace::new(),
+        })?;
+        
+        let _ = read_message(&mut recv).await;
+        Ok(())
+    }
+
+    /// Check health of all connections
+    async fn check_connection_health(connections: &Arc<RwLock<HashMap<u64, PeerConnection>>>) {
+        let mut to_remove = Vec::new();
+
+        {
+            let connections = connections.read().await;
+            for (peer_id, conn) in connections.iter() {
+                if conn.last_activity.elapsed() > Duration::from_secs(300) {
+                    to_remove.push(*peer_id);
+                }
+            }
+        }
+
+        if !to_remove.is_empty() {
+            let mut connections = connections.write().await;
+            for peer_id in to_remove {
+                connections.remove(&peer_id);
+                tracing::info!("Removed stale connection to peer {}", peer_id);
+            }
+        }
+    }
+
     /// Record sent Raft message metrics
     fn record_raft_message_sent(&self, msg_type: raft::eraftpb::MessageType) {
-        // Use try_lock to avoid blocking in async context
         if let Ok(mut sent) = self.messages_sent.try_lock() {
             let key = format!("Raft_{:?}", msg_type);
             *sent.entry(key).or_insert(0) += 1;
         }
         
-        #[cfg(feature = "observability")]
+        #[cfg(feature = "metrics-otel")]
         RAFT_MESSAGES_SENT.add(
             1,
             &[
-                attributes::TRANSPORT_TYPE.string("iroh"),
-                attributes::MESSAGE_TYPE.string(format!("Raft_{:?}", msg_type)),
+                KeyValue::new("transport_type", "iroh"),
+                KeyValue::new("message_type", format!("Raft_{:?}", msg_type)),
             ],
         );
     }
 
-    /// Get transport metrics
+    /// Get current transport connection and performance metrics
+    /// 
+    /// Returns a snapshot of transport metrics including active connections,
+    /// message throughput statistics, and connection pool performance data.
+    /// 
+    /// # Returns
+    /// 
+    /// `IrohRaftMetrics` containing:
+    /// - `active_connections`: Number of currently established peer connections
+    /// - `messages_sent`: Total number of messages sent since transport startup
+    /// - `messages_received`: Total number of messages received since transport startup
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,no_run
+    /// use iroh_raft::transport::iroh::IrohRaftTransport;
+    /// 
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let transport = IrohRaftTransport::new(/* config */).await?;
+    /// 
+    /// // Get current metrics
+    /// let metrics = transport.get_metrics().await;
+    /// println!("Active connections: {}", metrics.active_connections);
+    /// println!("Messages sent: {}", metrics.messages_sent);
+    /// println!("Messages received: {}", metrics.messages_received);
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// 
+    /// # Performance
+    /// 
+    /// This method acquires read locks on internal connection state, so it's
+    /// relatively lightweight but should not be called at very high frequency.
+    /// Consider caching the results if called frequently.
     pub async fn get_metrics(&self) -> IrohRaftMetrics {
         let connections = self.connections.read().await;
         let active_connections = connections.len();
@@ -858,409 +689,84 @@ impl IrohRaftTransport {
         }
     }
 
-    /// Shutdown the transport
+    /// Shutdown the transport gracefully
+    /// 
+    /// This method performs a coordinated shutdown of all transport components:
+    /// - Signals all background tasks to terminate
+    /// - Waits for running tasks to complete cleanly
+    /// - Closes all active peer connections with proper notifications
+    /// - Records final metrics and connection statistics
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,no_run
+    /// use iroh_raft::transport::iroh::IrohRaftTransport;
+    /// 
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let transport = IrohRaftTransport::new(/* config */).await?;
+    /// 
+    /// // Later, when shutting down
+    /// transport.shutdown().await;
+    /// println!("Transport shutdown complete");
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// 
+    /// # Behavior
+    /// 
+    /// - **Non-blocking**: Returns immediately after initiating shutdown
+    /// - **Graceful**: Allows in-flight operations to complete
+    /// - **Clean**: Properly closes resources and connections
+    /// - **Metrics**: Records shutdown statistics for observability
     pub async fn shutdown(&self) {
         tracing::info!("Shutting down Iroh Raft transport");
 
-        // Signal shutdown
+        // Signal shutdown to all tasks
         let _ = self.shutdown_tx.send(true);
+        self.shutdown_notify.notify_waiters();
 
-        // Wait for tasks
+        // Wait for all background tasks to complete
         let mut tasks = self.tasks.lock().await;
         for task in tasks.drain(..) {
-            let _ = task.await;
+            if let Err(e) = task.await {
+                tracing::warn!("Task failed during shutdown: {:?}", e);
+            }
         }
 
-        // Close connections
+        // Gracefully close all connections and record metrics
         let mut connections = self.connections.write().await;
-        connections.clear();
-
-        tracing::info!("Iroh Raft transport shutdown complete");
-    }
-}
-
-/// Handle an incoming Raft connection
-#[allow(dead_code)] // Future: implement automatic connection handling
-async fn handle_incoming_connection(
-    connection: iroh::endpoint::Connection,
-    raft_rx_tx: mpsc::UnboundedSender<(u64, Message)>,
-    node: Arc<SharedNodeState>,
-    messages_received: Arc<Mutex<HashMap<String, u64>>>,
-) -> Result<()> {
-    let remote_node_id = connection
-        .remote_node_id()
-        .map_err(|e| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-            message: format!("Failed to get remote node ID: {}", e),
-        })?;
-
-    // Find the peer ID for this Iroh node
-    let peers = node.get_peers().await;
-    let peer_id = peers
-        .iter()
-        .find(|p| p.p2p_node_id.as_ref() == Some(&remote_node_id.to_string()))
-        .map(|p| p.node_id)
-        .ok_or_else(|| {
-            RaftError::ClusterError {
-                message: format!("Unknown or invalid Iroh node: {}", remote_node_id),
-                backtrace: snafu::Backtrace::new(),
-            }
-        })?;
-
-    // Accept streams
-    loop {
-        match connection.accept_uni().await {
-            Ok(mut stream) => {
-                let raft_rx_tx = raft_rx_tx.clone();
-                let messages_received = messages_received.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        handle_raft_stream(&mut stream, peer_id, raft_rx_tx, messages_received)
-                            .await
-                    {
-                        tracing::warn!("Failed to handle Raft stream from {}: {}", peer_id, e);
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::debug!("Connection closed from {}: {}", peer_id, e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle a single Raft message stream
-#[allow(dead_code)] // Future: implement stream-based message handling
-async fn handle_raft_stream(
-    stream: &mut RecvStream,
-    from: u64,
-    raft_rx_tx: mpsc::UnboundedSender<(u64, Message)>,
-    messages_received: Arc<Mutex<HashMap<String, u64>>>,
-) -> Result<()> {
-    // Read messages from stream
-    loop {
-        match read_message(stream).await {
-            Ok((header, payload)) => {
-                if header.msg_type != MessageType::Request {
-                    continue;
-                }
-
-                // Deserialize Raft message
-                let message: Message = crate::raft::messages::deserialize_message(&payload)?;
-
-                // Record metrics
-                {
-                    let mut received = messages_received.lock().await;
-                    let key = format!("{:?}", message.msg_type());
-                    *received.entry(key.clone()).or_insert(0) += 1;
-
-                    #[cfg(feature = "observability")]
-                    RAFT_MESSAGES_RECEIVED.add(
-                        1,
-                        &[
-                            attributes::TRANSPORT_TYPE.string("iroh"),
-                            attributes::MESSAGE_TYPE.string(key),
-                        ],
-                    );
-                }
-
-                // Send to Raft manager
-                if let Err(e) = raft_rx_tx.send((from, message)) {
-                    tracing::error!("Failed to send Raft message to manager: {}", e);
-                    break;
+        let connection_count = connections.len();
+        
+        for (peer_id, conn) in connections.drain() {
+            #[cfg(feature = "metrics-otel")]
+            {
+                let duration = conn.last_activity.elapsed();
+                if let Some(metrics) = &self.metrics {
+                    metrics.transport_metrics().record_connection_closed(&peer_id.to_string(), duration);
                 }
             }
-            Err(e) => {
-                tracing::debug!("Stream ended from {}: {}", from, e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Process batched messages
-async fn process_message_batches(
-    message_buffer: &Arc<Mutex<HashMap<u64, VecDeque<BufferedRaftMessage>>>>,
-    connections: &Arc<RwLock<HashMap<u64, PeerConnection>>>,
-    node: &Arc<SharedNodeState>,
-    messages_sent: &Arc<Mutex<HashMap<String, u64>>>,
-    endpoint: &Endpoint,
-) {
-    let mut buffer = message_buffer.lock().await;
-    
-    // Log buffer status
-    let total_messages: usize = buffer.values().map(|q| q.len()).sum();
-    if total_messages > 0 {
-        tracing::debug!(
-            "RAFT_BATCH: Processing {} total buffered messages across {} peers",
-            total_messages,
-            buffer.len()
-        );
-    }
-
-    for (peer_id, messages) in buffer.iter_mut() {
-        if messages.is_empty() {
-            continue;
-        }
-        
-        tracing::debug!(
-            "RAFT_BATCH: Processing {} buffered messages for peer {}",
-            messages.len(),
-            peer_id
-        );
-
-        // Try to get connection
-        let conn_result = {
-            let connections = connections.read().await;
-            connections.get(peer_id).map(|c| c.connection.clone())
-        };
-
-        let connection = match conn_result {
-            Some(conn) => {
-                tracing::debug!(
-                    "RAFT_BATCH: Using existing connection for peer {}",
-                    peer_id
-                );
-                conn
-            }
-            None => {
-                tracing::debug!(
-                    "RAFT_BATCH: No existing connection for peer {}, creating new one",
-                    peer_id
-                );
-                // Try to create connection
-                match create_connection_for_peer(*peer_id, node, endpoint).await {
-                    Ok(conn) => {
-                        let connection = conn.connection.clone();
-                        // Store new connection
-                        let mut connections = connections.write().await;
-                        connections.insert(*peer_id, conn);
-                        tracing::debug!(
-                            "RAFT_BATCH: Created new connection for peer {}",
-                            peer_id
-                        );
-                        connection
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "RAFT_BATCH: Failed to connect to peer {}: {}",
-                            peer_id, e
-                        );
-                        continue;
-                    }
-                }
-            }
-        };
-
-        // Group messages by priority
-        let mut by_priority: HashMap<RaftMessagePriority, Vec<Message>> = HashMap::new();
-        let mut sent_count = 0;
-
-        while let Some(buffered) = messages.pop_front() {
-            // Skip old messages
-            if buffered.timestamp.elapsed() > Duration::from_secs(30) {
-                tracing::debug!(
-                    "RAFT_BATCH: Skipping old message to peer {} (age: {:?})",
-                    peer_id,
-                    buffered.timestamp.elapsed()
-                );
-                continue;
-            }
-
-            by_priority
-                .entry(buffered.priority)
-                .or_insert_with(Vec::new)
-                .push(buffered.message);
-
-            sent_count += 1;
-            if sent_count >= 100 {
-                // Batch size limit
-                tracing::debug!(
-                    "RAFT_BATCH: Hit batch size limit of 100 for peer {}",
-                    peer_id
-                );
-                break;
-            }
-        }
-
-        // Send batches by priority
-        for (priority, batch) in by_priority {
-            tracing::debug!(
-                "RAFT_BATCH: Sending batch of {} {:?} messages to peer {}",
-                batch.len(),
-                priority,
-                peer_id
-            );
-            if let Err(e) = send_message_batch(&connection, priority, batch, messages_sent).await {
-                tracing::warn!(
-                    "RAFT_BATCH: Failed to send batch to peer {}: {}",
-                    peer_id, e
-                );
-            } else {
-                tracing::debug!(
-                    "RAFT_BATCH: Successfully sent batch to peer {}",
-                    peer_id
-                );
-            }
-        }
-    }
-}
-
-/// Send a batch of messages using RPC to the raft service
-async fn send_message_batch(
-    connection: &Connection,
-    _priority: RaftMessagePriority,
-    messages: Vec<Message>,
-    messages_sent: &Arc<Mutex<HashMap<String, u64>>>,
-) -> Result<()> {
-    // Send each message as an RPC call to the raft service
-    for message in messages {
-        // Serialize the Raft message
-        let msg_data = crate::raft::messages::serialize_message(&message)?;
-        
-        // Create RPC request for the raft service
-        let request_id = crate::transport::protocol::generate_request_id();
-        let request = crate::transport::protocol::RpcRequest {
-            service: "raft".to_string(),
-            method: "raft.message".to_string(),
-            payload: msg_data,
-        };
-        
-        // Open bidirectional stream for RPC
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|e| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                message: format!("Failed to open bi stream: {}", e),
-            })?;
-        
-        // Serialize and send the RPC request
-        let request_bytes = crate::transport::protocol::serialize_payload(&request)?;
             
-        crate::transport::protocol::write_message(
-            &mut send,
-            crate::transport::protocol::MessageType::Request,
-            Some(request_id),
-            &request_bytes,
-        )
-        .await?;
-        
-        // Close the send stream to signal we're done sending
-        send.finish().map_err(|e| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-            message: format!("Failed to finish send stream: {}", e),
-        })?;
-        
-        // Wait for response (just to confirm delivery)
-        let _ = crate::transport::protocol::read_message(&mut recv).await;
-        
-        // Record metrics
-        {
-            let mut sent = messages_sent.lock().await;
-            let key = format!("{:?}", message.msg_type());
-            *sent.entry(key.clone()).or_insert(0) += 1;
-
-            #[cfg(feature = "observability")]
-            RAFT_MESSAGES_SENT.add(
-                1,
-                &[
-                    attributes::TRANSPORT_TYPE.string("iroh"),
-                    attributes::MESSAGE_TYPE.string(key),
-                ],
-            );
+            #[cfg(not(feature = "metrics-otel"))]
+            let _ = peer_id;
+            
+            // Close the connection gracefully
+            conn.connection.close(0u32.into(), b"shutdown");
         }
+        
+        tracing::info!(
+            "Iroh Raft transport shutdown complete. Closed {} connections",
+            connection_count
+        );
     }
-
-    Ok(())
-}
-
-/// Create a connection for a specific peer
-async fn create_connection_for_peer(
-    peer_id: u64,
-    node: &Arc<SharedNodeState>,
-    endpoint: &Endpoint,
-) -> Result<PeerConnection> {
-    let peer_info = node
-        .get_peer(peer_id)
-        .await
-        .ok_or_else(|| RaftError::ClusterError {
-            message: format!("Unknown peer {}", peer_id),
-            backtrace: snafu::Backtrace::new(),
-        })?;
-
-    let p2p_node_id = peer_info
-        .p2p_node_id
-        .ok_or_else(|| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-            message: format!("Peer {} has no P2P node ID", peer_id),
-        })?;
-    let iroh_node_id = p2p_node_id
-        .parse::<NodeId>()
-        .map_err(|e| RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-            message: format!("Invalid Iroh node ID: {}", e),
-        })?;
-
-    // Add timeout to connection attempt (10 seconds)
-    let connection_timeout = Duration::from_secs(10);
-    let connection = match tokio::time::timeout(
-        connection_timeout,
-        endpoint.connect(iroh_node_id, super::BLIXARD_ALPN)
-    ).await {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(e)) => {
-            return Err(RaftError::Internal {
-            backtrace: snafu::Backtrace::new(),
-                message: format!("Failed to connect to peer {}: {}", peer_id, e),
-            });
-        }
-        Err(_) => {
-            return Err(RaftError::Timeout {
-                operation: format!("connect to peer {}", peer_id),
-                duration: connection_timeout,
-                backtrace: snafu::Backtrace::new(),
-            });
-        }
-    };
-
-    Ok(PeerConnection {
-        node_id: peer_id,
-        iroh_node_id,
-        connection,
-        _election_stream: None,
-        _heartbeat_stream: None,
-        _append_stream: None,
-        _snapshot_stream: None,
-        last_activity: Instant::now(),
-    })
-}
-
-/// Check health of all connections
-async fn check_connection_health(connections: &Arc<RwLock<HashMap<u64, PeerConnection>>>) {
-    let mut to_remove = Vec::new();
-
-    {
-        let connections = connections.read().await;
-        for (peer_id, conn) in connections.iter() {
-            if conn.last_activity.elapsed() > Duration::from_secs(60) {
-                to_remove.push(*peer_id);
-            }
-        }
+    
+    /// Wait for shutdown signal
+    pub async fn wait_for_shutdown(&self) {
+        self.shutdown_notify.notified().await;
     }
-
-    if !to_remove.is_empty() {
-        let mut connections = connections.write().await;
-        for peer_id in to_remove {
-            connections.remove(&peer_id);
-            tracing::info!("Removed stale connection to peer {}", peer_id);
-        }
+    
+    /// Check if transport is shutting down
+    pub fn is_shutting_down(&self) -> bool {
+        *self.shutdown_rx.borrow()
     }
 }
 

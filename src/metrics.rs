@@ -95,7 +95,8 @@ impl MetricsRegistry {
         use opentelemetry::global;
         
         let service_name_owned = service_name.to_string();
-        let meter = global::meter(service_name_owned.clone());
+        // Use a fixed meter name for OpenTelemetry since it requires 'static
+        let meter = global::meter("iroh-raft");
         
         Ok(Self {
             inner: Arc::new(MetricsRegistryInner {
@@ -172,6 +173,7 @@ impl MetricsRegistry {
             .map_err(|_| crate::error::RaftError::LockPoisoned {
                 operation: "register_custom_counter".to_string(),
                 details: "custom metrics lock poisoned".to_string(),
+                backtrace: snafu::Backtrace::new(),
             })?;
         
         let name_owned = name.to_string();
@@ -180,8 +182,8 @@ impl MetricsRegistry {
         #[cfg(feature = "metrics-otel")]
         let counter = self.inner.meter.u64_counter(name_owned.clone())
             .with_description(description_owned.clone())
-            .init();
-        
+            .build();
+            
         custom_metrics.insert(name_owned.clone(), CustomMetric {
             name: name_owned,
             description: description_owned,
@@ -214,16 +216,16 @@ impl RaftMetrics {
         Ok(Self {
             leader_elections_total: meter.u64_counter("raft_leader_elections_total")
                 .with_description("Total number of leader elections")
-                .init(),
+                .build(),
             log_entries_total: meter.u64_counter("raft_log_entries_total")
                 .with_description("Total number of log entries")
-                .init(),
+                .build(),
             consensus_errors_total: meter.u64_counter("raft_consensus_errors_total")
                 .with_description("Total consensus protocol errors")
-                .init(),
+                .build(),
             append_entries_latency: meter.f64_histogram("raft_append_entries_latency_seconds")
                 .with_description("Latency of append entries operations")
-                .init(),
+                .build(),
         })
     }
 
@@ -291,13 +293,13 @@ impl StorageMetrics {
         Ok(Self {
             read_operations_total: meter.u64_counter("storage_read_operations_total")
                 .with_description("Total storage read operations")
-                .init(),
+                .build(),
             write_operations_total: meter.u64_counter("storage_write_operations_total")
                 .with_description("Total storage write operations")
-                .init(),
+                .build(),
             storage_latency: meter.f64_histogram("storage_operation_latency_seconds")
                 .with_description("Storage operation latency")
-                .init(),
+                .build(),
         })
     }
 
@@ -341,6 +343,12 @@ pub struct TransportMetrics {
     messages_received_total: Counter<u64>,
     #[cfg(feature = "metrics-otel")]
     network_errors_total: Counter<u64>,
+    #[cfg(feature = "metrics-otel")]
+    connections_active: Counter<u64>,
+    #[cfg(feature = "metrics-otel")]
+    message_latency: Histogram<f64>,
+    #[cfg(feature = "metrics-otel")]
+    connection_duration: Histogram<f64>,
 }
 
 impl TransportMetrics {
@@ -349,13 +357,22 @@ impl TransportMetrics {
         Ok(Self {
             messages_sent_total: meter.u64_counter("transport_messages_sent_total")
                 .with_description("Total P2P messages sent")
-                .init(),
+                .build(),
             messages_received_total: meter.u64_counter("transport_messages_received_total")
                 .with_description("Total P2P messages received")
-                .init(),
+                .build(),
             network_errors_total: meter.u64_counter("transport_network_errors_total")
                 .with_description("Total network transport errors")
-                .init(),
+                .build(),
+            connections_active: meter.u64_counter("transport_connections_active_total")
+                .with_description("Total active connections created")
+                .build(),
+            message_latency: meter.f64_histogram("transport_message_latency_seconds")
+                .with_description("Message round-trip latency")
+                .build(),
+            connection_duration: meter.f64_histogram("transport_connection_duration_seconds")
+                .with_description("Connection duration")
+                .build(),
         })
     }
 
@@ -364,9 +381,36 @@ impl TransportMetrics {
         Ok(Self {})
     }
 
-    /// Update active connections count (no-op in current implementation)
-    pub fn update_active_connections(&self, _count: u64) {
-        // Note: connection count would typically be tracked via a gauge
+    /// Record new active connection
+    pub fn record_connection_established(&self, peer_id: &str) {
+        #[cfg(feature = "metrics-otel")]
+        {
+            self.connections_active.add(1, &[
+                KeyValue::new("peer_id", peer_id.to_string()),
+                KeyValue::new("status", "established"),
+            ]);
+        }
+        
+        #[cfg(not(feature = "metrics-otel"))]
+        {
+            let _ = peer_id;
+        }
+    }
+    
+    /// Record connection closed
+    pub fn record_connection_closed(&self, peer_id: &str, duration: Duration) {
+        #[cfg(feature = "metrics-otel")]
+        {
+            self.connection_duration.record(duration.as_secs_f64(), &[
+                KeyValue::new("peer_id", peer_id.to_string()),
+                KeyValue::new("status", "closed"),
+            ]);
+        }
+        
+        #[cfg(not(feature = "metrics-otel"))]
+        {
+            let _ = (peer_id, duration);
+        }
     }
 
     /// Record message sent
@@ -382,6 +426,21 @@ impl TransportMetrics {
         #[cfg(not(feature = "metrics-otel"))]
         {
             let _ = (message_type, peer_id);
+        }
+    }
+    
+    /// Record message latency
+    pub fn record_message_latency(&self, message_type: &str, latency: Duration) {
+        #[cfg(feature = "metrics-otel")]
+        {
+            self.message_latency.record(latency.as_secs_f64(), &[
+                KeyValue::new("message_type", message_type.to_string()),
+            ]);
+        }
+        
+        #[cfg(not(feature = "metrics-otel"))]
+        {
+            let _ = (message_type, latency);
         }
     }
 
@@ -571,7 +630,7 @@ mod tests {
         let registry = MetricsRegistry::new("test-transport").unwrap();
         let transport_metrics = registry.transport_metrics();
         
-        transport_metrics.update_active_connections(5);
+        transport_metrics.record_connection_established("peer-1");
         transport_metrics.record_message_sent("append_entries", "peer-1");
         transport_metrics.record_message_received("vote_request", "peer-2");
         transport_metrics.record_network_error("connection_timeout");
