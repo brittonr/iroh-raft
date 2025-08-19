@@ -1,0 +1,75 @@
+[package]
+name = "iroh-raft"
+version = "0.1.0"
+edition = "2021"
+authors = ["Blixard Contributors"]
+description = "Distributed consensus library using Raft, Iroh P2P, and Redb storage"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/blixard/iroh-raft"
+keywords = ["raft", "consensus", "distributed", "p2p", "iroh"]
+categories = ["network-programming", "database", "concurrency"]
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Raft consensus
+raft = { workspace = true, default-features = false, features = ["prost-codec"] }
+raft-proto = { workspace = true, default-features = false, features = ["prost-codec"] }
+
+# Storage backend
+redb = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+toml = { workspace = true }
+humantime-serde = { workspace = true }
+postcard = { version = "1.0", features = ["use-std"] }
+
+# Iroh P2P networking
+iroh = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+
+# Utilities
+uuid = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+once_cell = { workspace = true }
+num_cpus = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Testing utilities
+proptest = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+proptest = { workspace = true }
+
+[features]
+default = []
+test-helpers = ["tempfile", "proptest"]
+metrics-otel = ["opentelemetry"]
+
+# Optional dependencies can be added later as needed
+
+# Benchmarks can be added later when needed
+# [[bench]]
+# name = "raft_transport"
+# harness = false
+
+[lib]
+name = "iroh_raft"
+path = "src/lib.rs"
