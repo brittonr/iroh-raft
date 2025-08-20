@@ -32,16 +32,16 @@ pub struct IrohTransport {
     config: NodeConfig,
     
     /// Iroh endpoint for P2P communication
-    endpoint: Option<Endpoint>,
+    _endpoint: Option<Endpoint>,
     
-    /// Known peers mapping node_id -> iroh_node_id
+    /// Known peers mapping node_id -> irohnode_id
     peers: Arc<RwLock<HashMap<u64, IrohNodeId>>>,
     
     /// Message sender for outgoing messages
-    outgoing_tx: mpsc::UnboundedSender<(u64, Message)>,
+    _outgoing_tx: mpsc::UnboundedSender<(u64, Message)>,
     
     /// Message receiver for outgoing messages
-    outgoing_rx: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(u64, Message)>>>>,
+    _outgoing_rx: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<(u64, Message)>>>>,
     
     /// Running flag
     running: Arc<RwLock<bool>>,
@@ -50,14 +50,14 @@ pub struct IrohTransport {
 impl IrohTransport {
     /// Create a new Iroh transport
     pub async fn new(config: &NodeConfig) -> Result<Self> {
-        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let (_outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
         
         Ok(Self {
             config: config.clone(),
-            endpoint: None,
+            _endpoint: None,
             peers: Arc::new(RwLock::new(HashMap::new())),
-            outgoing_tx,
-            outgoing_rx: Arc::new(tokio::sync::Mutex::new(Some(outgoing_rx))),
+            _outgoing_tx,
+            _outgoing_rx: Arc::new(tokio::sync::Mutex::new(Some(outgoing_rx))),
             running: Arc::new(RwLock::new(false)),
         })
     }
@@ -68,7 +68,7 @@ impl IrohTransport {
         
         // Create Iroh endpoint with a random secret key
         let secret_key = iroh::SecretKey::generate(&mut rand::thread_rng());
-        let endpoint = Endpoint::builder()
+        let _endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .discovery_n0()
             .bind()
@@ -177,7 +177,7 @@ impl IrohTransport {
 /// Simple mock transport for testing
 #[cfg(feature = "test-helpers")]
 pub struct MockTransport {
-    node_id: u64,
+    _node_id: u64,
     sent_messages: Arc<RwLock<Vec<Message>>>,
     message_handler: Option<Box<dyn Fn(Message) -> Result<()> + Send + Sync>>,
 }
@@ -187,7 +187,7 @@ impl MockTransport {
     /// Create a new mock transport
     pub fn new(node_id: u64) -> Self {
         Self {
-            node_id,
+            _node_id: node_id,
             sent_messages: Arc::new(RwLock::new(Vec::new())),
             message_handler: None,
         }
@@ -230,7 +230,7 @@ impl MockTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ConfigBuilder};
+    use crate::config::ConfigBuilder;
 
     #[tokio::test]
     async fn test_transport_creation() -> Result<()> {

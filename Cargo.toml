@@ -54,10 +54,25 @@ num_cpus = "1.16"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 
+# Lock-free data structures and concurrency
+crossbeam-utils = "0.8"
+crossbeam-queue = "0.3"
+dashmap = "6.1"
+
 # Testing utilities
 proptest = { version = "1.5", optional = true }
 tempfile = { version = "3.14", optional = true }
 madsim = { version = "0.2", optional = true }
+
+# HTTP server dependencies (feature-gated)
+axum = { version = "0.7", optional = true, features = ["ws", "macros"] }
+tower = { version = "0.4", optional = true, features = ["timeout"] }
+tower-http = { version = "0.5", optional = true, features = ["cors", "trace"] }
+utoipa = { version = "4.0", optional = true }
+utoipa-swagger-ui = { version = "6.0", optional = true, features = ["axum"] }
+tokio-tungstenite = { version = "0.21", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -66,13 +81,17 @@ proptest = "1.5"
 tokio-test = "0.4"
 pretty_assertions = "1.0"
 test-case = "3.0"
-thiserror = "1.0"
+thiserror = "2.0"
+tracing-subscriber = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+futures-util = "0.3"
 
 [features]
 default = []
 test-helpers = ["tempfile", "proptest"]
 metrics-otel = ["opentelemetry"]
 madsim = ["dep:madsim"]
+management-api = ["axum", "tower", "tower-http", "utoipa", "utoipa-swagger-ui", "tokio-tungstenite", "tokio-stream", "futures-util"]
 
 # Optional dependencies can be added later as needed
 

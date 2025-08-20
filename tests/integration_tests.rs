@@ -6,14 +6,12 @@
 #![cfg(test)]
 
 use iroh_raft::transport::iroh::IrohRaftTransport;
-use iroh_raft::transport::shared::SharedNodeState;
+use iroh_raft::transport::shared::{SharedNodeState, PeerInfo};
 use iroh_raft::transport::protocol::{
     RaftProtocolHandler, ZeroCopyMessage, MessageType, raft_utils,
     LARGE_MESSAGE_THRESHOLD, RAFT_ALPN,
 };
-use iroh_raft::types::{NodeId, PeerInfo, ClusterInfo};
-use iroh_raft::discovery::registry::NodeRegistry;
-use iroh_raft::test_helpers::create_temp_dir;
+use iroh_raft::types::NodeId;
 use raft::prelude::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,18 +27,9 @@ async fn create_test_transport_with_handler(
     node_id: NodeId,
     port: u16,
 ) -> Result<(IrohRaftTransport, Arc<SharedNodeState>, Endpoint, mpsc::UnboundedReceiver<(u64, Message)>), Box<dyn std::error::Error>> {
-    let temp_dir = create_temp_dir()?;
-    let cluster_info = ClusterInfo {
-        cluster_id: "test-cluster".to_string(),
-        nodes: HashMap::new(),
-    };
-    
-    let node_registry = Arc::new(NodeRegistry::new());
-    let shared_state = Arc::new(SharedNodeState::new(
-        node_id,
-        cluster_info,
-        node_registry,
-    ));
+    // Set up channels for Raft message passing
+    let (raft_tx, raft_rx) = mpsc::unbounded_channel();
+    let shared_state = Arc::new(SharedNodeState::new(node_id, raft_tx));
     
     let endpoint = Endpoint::builder()
         .alpns(vec![RAFT_ALPN.to_vec()])
@@ -52,12 +41,7 @@ async fn create_test_transport_with_handler(
     let (tx, rx) = mpsc::unbounded_channel();
     
     // Create protocol handler
-    let protocol_handler = RaftProtocolHandler::new(node_id, tx.clone());
-    
-    // Set up protocol handling
-    endpoint.accept(RAFT_ALPN, Arc::new(move |conn| {
-        protocol_handler.accept(conn)
-    }));
+    let _protocol_handler = RaftProtocolHandler::new(node_id, tx.clone());
     
     let transport = IrohRaftTransport::new(
         shared_state.clone(),
@@ -66,7 +50,7 @@ async fn create_test_transport_with_handler(
         tx,
     );
     
-    Ok((transport, shared_state, endpoint, rx))
+    Ok((transport, shared_state, endpoint, raft_rx))
 }
 
 /// Test helper to add peer information to shared state
@@ -78,18 +62,14 @@ async fn add_test_peer(
 ) {
     let peer_info = PeerInfo {
         node_id: peer_id,
-        address: format!("127.0.0.1:{}", port),
+        public_key: endpoint.node_id(),
+        address: Some(format!("127.0.0.1:{}", port)),
         p2p_node_id: Some(endpoint.node_id().to_string()),
         p2p_addresses: vec![format!("127.0.0.1:{}", port)],
         p2p_relay_url: None,
     };
     
-    shared_state.add_peer(peer_id, peer_info).await;
-    
-    // Also add to node registry
-    let node_addr = NodeAddr::new(endpoint.node_id())
-        .with_direct_addresses([format!("127.0.0.1:{}", port).parse::<SocketAddr>().unwrap()]);
-    shared_state.node_registry().register_node(peer_id, node_addr).await;
+    shared_state.add_peer(peer_info).await;
 }
 
 /// Test full message flow with connection pooling
@@ -107,7 +87,7 @@ async fn test_full_message_flow_with_pooling() -> Result<(), Box<dyn std::error:
     transport2.start().await?;
     
     // Send first message
-    let mut msg1 = Message::new();
+    let mut msg1 = Message::default();
     msg1.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg1.from = 1;
     msg1.to = 2;
@@ -125,7 +105,7 @@ async fn test_full_message_flow_with_pooling() -> Result<(), Box<dyn std::error:
     assert_eq!(received_msg.term, 1);
     
     // Send second message (should reuse connection)
-    let mut msg2 = Message::new();
+    let mut msg2 = Message::default();
     msg2.set_msg_type(raft::prelude::MessageType::MsgAppend);
     msg2.from = 1;
     msg2.to = 2;
@@ -178,7 +158,7 @@ async fn test_performance_under_load() -> Result<(), Box<dyn std::error::Error>>
     
     // Send many messages rapidly
     for i in 0..message_count {
-        let mut msg = Message::new();
+        let mut msg = Message::default();
         msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
         msg.from = 1;
         msg.to = 2;
@@ -238,7 +218,7 @@ async fn test_large_message_handling() -> Result<(), Box<dyn std::error::Error>>
     transport2.start().await?;
     
     // Create a large message that would use streaming
-    let mut large_msg = Message::new();
+    let mut large_msg = Message::default();
     large_msg.set_msg_type(raft::prelude::MessageType::MsgSnapshot);
     large_msg.from = 1;
     large_msg.to = 2;
@@ -286,7 +266,7 @@ async fn test_failure_recovery_scenarios() -> Result<(), Box<dyn std::error::Err
     transport2.start().await?;
     
     // Establish connection
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -358,7 +338,7 @@ async fn test_zero_copy_message_flow() -> Result<(), Box<dyn std::error::Error>>
     ];
     
     for (i, msg_type) in test_cases.iter().enumerate() {
-        let mut msg = Message::new();
+        let mut msg = Message::default();
         msg.set_msg_type(*msg_type);
         msg.from = 1;
         msg.to = 2;
@@ -408,7 +388,7 @@ async fn test_graceful_shutdown_during_flow() -> Result<(), Box<dyn std::error::
         tokio::spawn(async move {
             let mut term = 1;
             while !transport.is_shutting_down() {
-                let mut msg = Message::new();
+                let mut msg = Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
                 msg.from = 1;
                 msg.to = 2;
@@ -471,7 +451,7 @@ proptest! {
         include_large_messages in any::<bool>(),
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        rt.block_on(async move {
             let (transport1, shared_state1, endpoint1, mut rx1) = 
                 create_test_transport_with_handler(1, 7200).await.unwrap();
             let (transport2, shared_state2, endpoint2, mut rx2) = 
@@ -490,7 +470,7 @@ proptest! {
             
             // Send messages with varying patterns
             for i in 0..message_count {
-                let mut msg = Message::new();
+                let mut msg = Message::default();
                 
                 if include_large_messages && i % 10 == 0 {
                     msg.set_msg_type(raft::prelude::MessageType::MsgSnapshot);
@@ -541,7 +521,9 @@ proptest! {
             // Cleanup
             transport1.shutdown().await;
             transport2.shutdown().await;
-        });
+            
+            Ok(())
+        })?;
     }
 }
 
@@ -567,13 +549,13 @@ async fn test_concurrent_connections() -> Result<(), Box<dyn std::error::Error>>
     transport3.start().await?;
     
     // Send messages from 1 to both 2 and 3
-    let mut msg_to_2 = Message::new();
+    let mut msg_to_2 = Message::default();
     msg_to_2.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg_to_2.from = 1;
     msg_to_2.to = 2;
     msg_to_2.term = 1;
     
-    let mut msg_to_3 = Message::new();
+    let mut msg_to_3 = Message::default();
     msg_to_3.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg_to_3.from = 1;
     msg_to_3.to = 3;
@@ -618,17 +600,18 @@ async fn test_integration_error_handling() -> Result<(), Box<dyn std::error::Err
     // Add invalid peer
     let invalid_peer = PeerInfo {
         node_id: 999,
-        address: "invalid:99999".to_string(),
+        public_key: iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap(),
+        address: Some("invalid:99999".to_string()),
         p2p_node_id: Some("invalid-node-id".to_string()),
         p2p_addresses: vec!["invalid:99999".to_string()],
         p2p_relay_url: None,
     };
-    shared_state1.add_peer(999, invalid_peer).await;
+    shared_state1.add_peer(invalid_peer).await;
     
     transport1.start().await?;
     
     // Try to send to invalid peer
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 999;
@@ -678,7 +661,7 @@ async fn test_transport_stress() -> Result<(), Box<dyn std::error::Error>> {
         let handle = tokio::spawn(async move {
             let mut success_count = 0;
             for i in 0..message_count / concurrent_senders {
-                let mut msg = Message::new();
+                let mut msg = Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
                 msg.from = 1;
                 msg.to = 2;

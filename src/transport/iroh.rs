@@ -547,7 +547,7 @@ impl IrohRaftTransport {
                     continue;
                 }
 
-                if let Err(_) = Self::send_single_message(&connection, &buffered.message).await {
+                if Self::send_single_message(&connection, &buffered.message).await.is_err() {
                     // Put message back if send failed
                     messages.push_front(buffered);
                     break;

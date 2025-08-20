@@ -893,7 +893,7 @@ impl RaftManager {
             let mut pending = pending_proposals.write().await;
             if let Some(response_tx) = pending.remove(&entry.context) {
                 info!(self.logger, "[RAFT-READY] Sending proposal response"; "success" => result.is_ok());
-                if let Err(_) = response_tx.send(result) {
+                if response_tx.send(result).is_err() {
                     warn!(
                         self.logger,
                         "[RAFT-READY] Failed to send proposal response - receiver dropped"
@@ -1090,7 +1090,7 @@ impl RaftManager {
         );
 
         // Send through the outgoing channel for the transport layer to handle
-        if let Err(_) = self.outgoing_messages.send((to, msg)) {
+        if self.outgoing_messages.send((to, msg)).is_err() {
             warn!(self.logger, "[RAFT-MESSAGE] Failed to send message - channel closed"; 
                 "to" => to, "type" => ?msg_type);
             // Double-check if the channel is really closed

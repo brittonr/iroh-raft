@@ -1,0 +1,736 @@
+openapi: 3.0.3
+info:
+  title: iroh-raft Management API
+  description: |
+    REST API for managing and monitoring iroh-raft clusters.
+    
+    This API provides administrative operations for Raft consensus clusters,
+    including node management, configuration updates, health monitoring,
+    and observability endpoints.
+    
+    ## Authentication
+    
+    The API supports multiple authentication methods:
+    - Bearer token authentication
+    - Mutual TLS (mTLS) certificate authentication
+    - No authentication (development only)
+    
+    ## Rate Limiting
+    
+    API endpoints are rate limited to prevent abuse:
+    - Administrative operations: 10 requests/minute
+    - Read operations: 100 requests/minute
+    - Metrics endpoints: 1000 requests/minute
+    
+  version: "1.0.0"
+  contact:
+    name: iroh-raft API Support
+    url: https://github.com/n0-computer/iroh-raft
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:8090/api/v1
+    description: Local development server
+  - url: https://cluster.example.com/api/v1
+    description: Production cluster
+
+security:
+  - bearerAuth: []
+  - mutualTLS: []
+
+paths:
+  # Cluster Management
+  /cluster:
+    get:
+      tags: [Cluster]
+      summary: Get cluster status
+      description: Returns comprehensive status information about the Raft cluster
+      responses:
+        '200':
+          description: Cluster status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterStatus'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /cluster/health:
+    get:
+      tags: [Cluster]
+      summary: Cluster health check
+      description: |
+        Returns health status of the cluster including:
+        - Overall cluster health
+        - Node health status
+        - Consensus state
+        - Network connectivity
+      responses:
+        '200':
+          description: Cluster is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheck'
+        '503':
+          description: Cluster is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheck'
+
+  /cluster/leadership/transfer:
+    post:
+      tags: [Cluster]
+      summary: Transfer leadership
+      description: Initiates leadership transfer to specified node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadershipTransferRequest'
+      responses:
+        '200':
+          description: Leadership transfer initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Leadership transfer not possible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Node Management
+  /nodes:
+    get:
+      tags: [Nodes]
+      summary: List cluster nodes
+      description: Returns list of all nodes in the cluster
+      parameters:
+        - name: status
+          in: query
+          description: Filter nodes by status
+          schema:
+            type: string
+            enum: [online, offline, unknown]
+        - name: role
+          in: query
+          description: Filter nodes by role
+          schema:
+            type: string
+            enum: [leader, follower, candidate]
+      responses:
+        '200':
+          description: List of cluster nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NodeInfo'
+
+    post:
+      tags: [Nodes]
+      summary: Add node to cluster
+      description: |
+        Adds a new node to the Raft cluster. The node must be running
+        and reachable at the specified address.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddNodeRequest'
+      responses:
+        '201':
+          description: Node added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResult'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Node already exists or conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /nodes/{nodeId}:
+    get:
+      tags: [Nodes]
+      summary: Get node details
+      description: Returns detailed information about a specific node
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: Unique identifier of the node
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Node details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeDetails'
+        '404':
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [Nodes]
+      summary: Remove node from cluster
+      description: |
+        Removes a node from the Raft cluster. This operation requires
+        cluster consensus and may fail if it would leave the cluster
+        without a majority.
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          description: Unique identifier of the node to remove
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Node removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResult'
+        '400':
+          description: Cannot remove node (would break majority)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Node not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Configuration Management
+  /config:
+    get:
+      tags: [Configuration]
+      summary: Get cluster configuration
+      description: Returns current cluster configuration
+      responses:
+        '200':
+          description: Cluster configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterConfig'
+
+    put:
+      tags: [Configuration]
+      summary: Update cluster configuration
+      description: |
+        Updates cluster configuration. Some changes may require
+        cluster restart to take effect.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigUpdateRequest'
+      responses:
+        '200':
+          description: Configuration updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResult'
+        '400':
+          description: Invalid configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Monitoring and Observability
+  /metrics:
+    get:
+      tags: [Monitoring]
+      summary: Get Prometheus metrics
+      description: Returns metrics in Prometheus exposition format
+      produces:
+        - text/plain
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP iroh_raft_proposals_total Total number of proposals
+                  # TYPE iroh_raft_proposals_total counter
+                  iroh_raft_proposals_total{status="success"} 42
+                  iroh_raft_proposals_total{status="failed"} 3
+
+  /logs:
+    get:
+      tags: [Monitoring]
+      summary: Get recent log entries
+      description: Returns recent Raft log entries
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of entries to return
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+        - name: since_index
+          in: query
+          description: Return entries since this index
+          schema:
+            type: integer
+            format: int64
+        - name: level
+          in: query
+          description: Minimum log level
+          schema:
+            type: string
+            enum: [trace, debug, info, warn, error]
+            default: info
+      responses:
+        '200':
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogEntries'
+
+  /events:
+    get:
+      tags: [Monitoring]
+      summary: Server-sent events stream
+      description: |
+        Returns a stream of cluster events using Server-Sent Events (SSE).
+        Useful for real-time monitoring and dashboards.
+      parameters:
+        - name: types
+          in: query
+          description: Comma-separated list of event types to include
+          schema:
+            type: string
+            example: "leadership_change,node_added,node_removed"
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  # Application-specific endpoints (state machine queries)
+  /state:
+    get:
+      tags: [State]
+      summary: Query application state
+      description: |
+        Queries the current state of the application state machine.
+        The response format depends on the specific state machine implementation.
+      responses:
+        '200':
+          description: Current application state
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Application-specific state representation
+
+  /state/snapshot:
+    post:
+      tags: [State]
+      summary: Create state snapshot
+      description: Triggers creation of a state machine snapshot
+      responses:
+        '200':
+          description: Snapshot created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotInfo'
+        '500':
+          description: Snapshot creation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    mutualTLS:
+      type: mutualTLS
+
+  schemas:
+    # Core cluster schemas
+    ClusterStatus:
+      type: object
+      properties:
+        cluster_id:
+          type: string
+          description: Unique identifier for the cluster
+        leader_id:
+          type: integer
+          format: int64
+          description: ID of current leader node
+          nullable: true
+        term:
+          type: integer
+          format: int64
+          description: Current Raft term
+        commit_index:
+          type: integer
+          format: int64
+          description: Highest log entry known to be committed
+        applied_index:
+          type: integer
+          format: int64
+          description: Highest log entry applied to state machine
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeInfo'
+        state:
+          type: string
+          enum: [leader, follower, candidate, pre_candidate, learner]
+          description: Current node state in Raft algorithm
+
+    NodeInfo:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Unique node identifier
+        address:
+          type: string
+          description: Network address of the node
+        role:
+          type: string
+          enum: [leader, follower, candidate, learner]
+          description: Current role in the cluster
+        status:
+          type: string
+          enum: [online, offline, unknown]
+          description: Current connectivity status
+        last_contact:
+          type: string
+          format: date-time
+          description: Last successful contact with this node
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Optional node metadata
+
+    NodeDetails:
+      allOf:
+        - $ref: '#/components/schemas/NodeInfo'
+        - type: object
+          properties:
+            stats:
+              $ref: '#/components/schemas/NodeStats'
+            config:
+              type: object
+              description: Node-specific configuration
+
+    NodeStats:
+      type: object
+      properties:
+        uptime_seconds:
+          type: integer
+          format: int64
+          description: Node uptime in seconds
+        proposals_received:
+          type: integer
+          format: int64
+          description: Total proposals received
+        proposals_committed:
+          type: integer
+          format: int64
+          description: Total proposals committed
+        messages_sent:
+          type: integer
+          format: int64
+          description: Total messages sent to other nodes
+        messages_received:
+          type: integer
+          format: int64
+          description: Total messages received from other nodes
+        disk_usage_bytes:
+          type: integer
+          format: int64
+          description: Disk space used by this node
+        memory_usage_bytes:
+          type: integer
+          format: int64
+          description: Memory usage of the node process
+
+    HealthCheck:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          description: Overall cluster health status
+        timestamp:
+          type: string
+          format: date-time
+          description: Health check timestamp
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthCheckItem'
+        summary:
+          type: string
+          description: Human-readable health summary
+
+    HealthCheckItem:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Name of the health check
+        status:
+          type: string
+          enum: [pass, warn, fail]
+          description: Status of this specific check
+        message:
+          type: string
+          description: Details about the check result
+        duration_ms:
+          type: integer
+          description: Time taken to perform the check
+
+    # Request/Response schemas
+    LeadershipTransferRequest:
+      type: object
+      required: [target_node_id]
+      properties:
+        target_node_id:
+          type: integer
+          format: int64
+          description: ID of node to transfer leadership to
+        timeout_seconds:
+          type: integer
+          description: Maximum time to wait for transfer completion
+          default: 30
+          minimum: 1
+          maximum: 300
+
+    AddNodeRequest:
+      type: object
+      required: [node_id, address]
+      properties:
+        node_id:
+          type: integer
+          format: int64
+          description: Unique identifier for the new node
+        address:
+          type: string
+          description: Network address of the new node
+          example: "192.168.1.100:8080"
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Optional metadata for the node
+
+    ConfigUpdateRequest:
+      type: object
+      properties:
+        election_timeout_ms:
+          type: integer
+          description: Election timeout in milliseconds
+          minimum: 1000
+          maximum: 60000
+        heartbeat_interval_ms:
+          type: integer
+          description: Heartbeat interval in milliseconds
+          minimum: 100
+          maximum: 10000
+        max_uncommitted_entries:
+          type: integer
+          description: Maximum number of uncommitted log entries
+          minimum: 1
+          maximum: 100000
+
+    OperationResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Whether the operation succeeded
+        message:
+          type: string
+          description: Human-readable result message
+        operation_id:
+          type: string
+          description: Unique identifier for tracking the operation
+        timestamp:
+          type: string
+          format: date-time
+          description: When the operation completed
+
+    ClusterConfig:
+      type: object
+      properties:
+        cluster_id:
+          type: string
+          description: Unique cluster identifier
+        election_timeout_ms:
+          type: integer
+          description: Election timeout in milliseconds
+        heartbeat_interval_ms:
+          type: integer
+          description: Heartbeat interval in milliseconds
+        max_uncommitted_entries:
+          type: integer
+          description: Maximum uncommitted log entries
+        snapshot_threshold:
+          type: integer
+          description: Log entries threshold for snapshot creation
+        compaction_threshold:
+          type: integer
+          description: Log entries threshold for compaction
+
+    LogEntries:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+        total_count:
+          type: integer
+          description: Total number of log entries available
+        has_more:
+          type: boolean
+          description: Whether more entries are available
+
+    LogEntry:
+      type: object
+      properties:
+        index:
+          type: integer
+          format: int64
+          description: Log entry index
+        term:
+          type: integer
+          format: int64
+          description: Raft term when entry was created
+        timestamp:
+          type: string
+          format: date-time
+          description: When the entry was created
+        entry_type:
+          type: string
+          enum: [normal, config_change, no_op]
+          description: Type of log entry
+        size_bytes:
+          type: integer
+          description: Size of the entry data in bytes
+        committed:
+          type: boolean
+          description: Whether this entry has been committed
+
+    SnapshotInfo:
+      type: object
+      properties:
+        index:
+          type: integer
+          format: int64
+          description: Log index of the snapshot
+        term:
+          type: integer
+          format: int64
+          description: Raft term of the snapshot
+        timestamp:
+          type: string
+          format: date-time
+          description: When the snapshot was created
+        size_bytes:
+          type: integer
+          format: int64
+          description: Size of the snapshot data
+        checksum:
+          type: string
+          description: Checksum of the snapshot data
+
+    # Error schemas
+    ErrorResponse:
+      type: object
+      required: [error, message, timestamp, request_id]
+      properties:
+        error:
+          type: string
+          description: Error type/code
+          example: "INVALID_REQUEST"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Node ID must be a positive integer"
+        details:
+          type: object
+          description: Additional error details
+          nullable: true
+        timestamp:
+          type: string
+          format: date-time
+          description: When the error occurred
+        request_id:
+          type: string
+          description: Unique identifier for this request
+          example: "req_123456789"
+
+tags:
+  - name: Cluster
+    description: Cluster-level operations and status
+  - name: Nodes
+    description: Node management operations
+  - name: Configuration
+    description: Cluster configuration management
+  - name: Monitoring
+    description: Monitoring and observability endpoints
+  - name: State
+    description: Application state machine operations

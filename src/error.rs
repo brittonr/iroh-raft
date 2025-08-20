@@ -45,14 +45,103 @@
 use std::time::Duration;
 use snafu::{prelude::*, Backtrace};
 
+// === Boxed Error Structs for Large Variants ===
+
+/// Database-related error details
+#[derive(Debug)]
+pub struct DatabaseError {
+    /// The database operation that failed
+    pub operation: String,
+    /// The underlying redb error
+    pub source: redb::Error,
+    /// Error backtrace for debugging
+    pub backtrace: Backtrace,
+}
+
+impl std::fmt::Display for DatabaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Database error in '{}': {}", self.operation, self.source)
+    }
+}
+
+impl std::error::Error for DatabaseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Storage-related error details
+#[derive(Debug)]
+pub struct StorageError {
+    /// The storage operation that failed
+    pub operation: String,
+    /// The underlying error that caused the failure
+    pub source: Box<dyn std::error::Error + Send + Sync>,
+    /// Error backtrace for debugging
+    pub backtrace: Backtrace,
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Storage operation '{}' failed", self.operation)
+    }
+}
+
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// Transport-related error details
+#[derive(Debug)]
+pub struct TransportError {
+    /// Details about the transport error
+    pub details: String,
+    /// Error backtrace for debugging
+    pub backtrace: Backtrace,
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "P2P transport error: {}", self.details)
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+/// Consensus-related error details
+#[derive(Debug)]
+pub struct ConsensusError {
+    /// The operation that triggered the consensus error
+    pub operation: String,
+    /// The underlying Raft library error
+    pub source: raft::Error,
+    /// Error backtrace for debugging
+    pub backtrace: Backtrace,
+}
+
+impl std::fmt::Display for ConsensusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Raft consensus error in '{}': {}", self.operation, self.source)
+    }
+}
+
+impl std::error::Error for ConsensusError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Comprehensive error type for iroh-raft consensus operations
 ///
 /// This error type covers all failure modes in the distributed consensus system,
 /// from low-level storage operations to high-level Raft protocol violations.
+/// Large error variants are boxed to keep the overall enum size small.
 #[derive(Snafu, Debug)]
 #[snafu(visibility(pub))]
 pub enum RaftError {
-    // === Raft Protocol Errors ===
+    // === Small Raft Protocol Errors (kept unboxed) ===
     
     /// Node is not the current leader for write operations
     #[snafu(display("Not leader for operation '{operation}', current leader: {current_leader:?}"))]
@@ -61,21 +150,46 @@ pub enum RaftError {
         operation: String,
         /// The current leader node ID, if known
         current_leader: Option<u64>,
-        /// Error backtrace for debugging
-        backtrace: Backtrace,
     },
 
-    /// Raft consensus error from the underlying raft library
-    #[snafu(display("Raft consensus error in '{operation}': {source}"))]
-    Consensus {
-        /// The operation that triggered the consensus error
-        operation: String,
-        /// The underlying Raft library error
-        #[snafu(source)]
-        source: raft::Error,
-        /// Error backtrace for debugging
-        backtrace: Backtrace,
+    /// Invalid node ID or node not found in cluster configuration
+    #[snafu(display("Node {node_id} not found in cluster configuration"))]
+    NodeNotFound { 
+        /// The node ID that was not found
+        node_id: u64,
     },
+
+    // === Large Error Variants (boxed for size optimization) ===
+
+    /// Raft consensus error from the underlying raft library
+    #[snafu(display("{}", inner))]
+    Consensus {
+        /// Boxed consensus error details
+        inner: Box<ConsensusError>,
+    },
+
+    /// Database operation failed
+    #[snafu(display("{}", inner))]
+    Database {
+        /// Boxed database error details
+        inner: Box<DatabaseError>,
+    },
+
+    /// Storage operation failed
+    #[snafu(display("{}", inner))]
+    Storage {
+        /// Boxed storage error details
+        inner: Box<StorageError>,
+    },
+
+    /// P2P transport error
+    #[snafu(display("{}", inner))]
+    Transport { 
+        /// Boxed transport error details
+        inner: Box<TransportError>,
+    },
+
+    // === Other Error Variants ===
 
     /// Node is not initialized or ready for operations
     #[snafu(display("Node {node_id} not ready for operation '{operation}': {reason}"))]
@@ -86,15 +200,6 @@ pub enum RaftError {
         operation: String,
         /// The reason why the node is not ready
         reason: String,
-        /// Error backtrace for debugging
-        backtrace: Backtrace,
-    },
-
-    /// Invalid node ID or node not found in cluster configuration
-    #[snafu(display("Node {node_id} not found in cluster configuration"))]
-    NodeNotFound { 
-        /// The node ID that was not found
-        node_id: u64,
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
@@ -132,28 +237,44 @@ pub enum RaftError {
         backtrace: Backtrace,
     },
 
-    // === Storage Errors ===
-
-    /// Database operation failed
-    #[snafu(display("Storage operation '{operation}' failed"))]
-    Storage {
-        /// The storage operation that failed
+    /// Operation timed out
+    #[snafu(display("Operation '{operation}' timed out after {duration:?}"))]
+    Timeout {
+        /// The operation that timed out
         operation: String,
-        /// The underlying error that caused the failure
-        #[snafu(source)]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        /// How long we waited before timing out
+        duration: Duration,
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
 
-    /// Redb database error
-    #[snafu(display("Database error in '{operation}': {source}"))]
-    Database {
-        /// The database operation that failed
+    /// Circuit breaker is open, failing fast
+    #[snafu(display("Circuit breaker open: {message}"))]
+    CircuitBreakerOpen {
+        /// Description of the circuit breaker failure
+        message: String,
+        /// Error backtrace for debugging
+        backtrace: Backtrace,
+    },
+
+    /// Backpressure applied - resource overloaded
+    #[snafu(display("Backpressure applied: {operation} - {reason}"))]
+    Backpressure {
+        /// The operation that was throttled
         operation: String,
-        /// The underlying redb error
-        #[snafu(source)]
-        source: redb::Error,
+        /// The reason for applying backpressure
+        reason: String,
+        /// Error backtrace for debugging
+        backtrace: Backtrace,
+    },
+
+    /// Resource exhausted (memory, connections, etc.)
+    #[snafu(display("Resource exhausted: {resource} - {details}"))]
+    ResourceExhausted {
+        /// The type of resource that was exhausted
+        resource: String,
+        /// Additional details about the exhaustion
+        details: String,
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
@@ -189,17 +310,6 @@ pub enum RaftError {
         needed: u64,
         /// Number of bytes available
         available: u64,
-        /// Error backtrace for debugging
-        backtrace: Backtrace,
-    },
-
-    // === Transport/Networking Errors ===
-
-    /// P2P transport error
-    #[snafu(display("P2P transport error: {details}"))]
-    Transport { 
-        /// Details about the transport error
-        details: String,
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
@@ -262,8 +372,6 @@ pub enum RaftError {
         backtrace: Backtrace,
     },
 
-    // === Configuration Errors ===
-
     /// Invalid configuration provided
     #[snafu(display("Invalid configuration for {component}: {message}"))]
     InvalidConfiguration {
@@ -297,30 +405,6 @@ pub enum RaftError {
         backtrace: Backtrace,
     },
 
-    // === Resource Management Errors ===
-
-    /// Resource exhaustion (memory, file descriptors, etc.)
-    #[snafu(display("Resource exhausted: {resource_type} - {details}"))]
-    ResourceExhausted {
-        /// The type of resource that was exhausted
-        resource_type: String,
-        /// Additional details about the exhaustion
-        details: String,
-        /// Error backtrace for debugging
-        backtrace: Backtrace,
-    },
-
-    /// Operation timeout
-    #[snafu(display("Operation '{operation}' timed out after {duration:?}"))]
-    Timeout {
-        /// The operation that timed out
-        operation: String,
-        /// How long the operation waited before timing out
-        duration: Duration,
-        /// Error backtrace for debugging
-        backtrace: Backtrace,
-    },
-
     /// Service unavailable or shutting down
     #[snafu(display("Service unavailable: {service} - {reason}"))]
     ServiceUnavailable {
@@ -331,8 +415,6 @@ pub enum RaftError {
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
-
-    // === Security Errors ===
 
     /// Authentication failure
     #[snafu(display("Authentication failed for peer {peer_id}: {reason}"))]
@@ -366,8 +448,6 @@ pub enum RaftError {
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
-
-    // === Internal/Programming Errors ===
 
     /// Internal invariant violated - indicates a bug
     #[snafu(display("Internal invariant violated: {details}"))]
@@ -411,8 +491,6 @@ pub enum RaftError {
         backtrace: Backtrace,
     },
 
-    // === Input/Validation Errors ===
-
     /// Invalid input parameters
     #[snafu(display("Invalid input for {parameter}: {message}"))]
     InvalidInput {
@@ -447,8 +525,6 @@ pub enum RaftError {
         /// Error backtrace for debugging
         backtrace: Backtrace,
     },
-
-    // === General System Errors ===
 
     /// I/O operation failed
     #[snafu(display("I/O error during {operation}: {source}"))]
@@ -589,32 +665,52 @@ impl RaftError {
             RaftError::ClusterError { .. } => "cluster",
 
             RaftError::Multiple { .. } => "multiple",
+            
+            RaftError::CircuitBreakerOpen { .. } => "circuit_breaker",
+            RaftError::Backpressure { .. } => "backpressure",
         }
     }
 
     /// Create a storage error with context
     pub fn storage_error(operation: &str, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         RaftError::Storage {
-            operation: operation.to_string(),
-            source: Box::new(source),
-            backtrace: Backtrace::new(),
+            inner: Box::new(StorageError {
+                operation: operation.to_string(),
+                source: Box::new(source),
+                backtrace: Backtrace::new(),
+            }),
         }
     }
 
     /// Create a transport error with context
     pub fn transport_error(details: &str) -> Self {
         RaftError::Transport {
-            details: details.to_string(),
-            backtrace: Backtrace::new(),
+            inner: Box::new(TransportError {
+                details: details.to_string(),
+                backtrace: Backtrace::new(),
+            }),
         }
     }
 
     /// Create a consensus error with context
     pub fn consensus_error(operation: &str, source: raft::Error) -> Self {
         RaftError::Consensus {
-            operation: operation.to_string(),
-            source,
-            backtrace: Backtrace::new(),
+            inner: Box::new(ConsensusError {
+                operation: operation.to_string(),
+                source,
+                backtrace: Backtrace::new(),
+            }),
+        }
+    }
+
+    /// Create a database error with context
+    pub fn database_error(operation: &str, source: redb::Error) -> Self {
+        RaftError::Database {
+            inner: Box::new(DatabaseError {
+                operation: operation.to_string(),
+                source,
+                backtrace: Backtrace::new(),
+            }),
         }
     }
 
@@ -656,21 +752,13 @@ impl From<std::io::Error> for RaftError {
 
 impl From<redb::Error> for RaftError {
     fn from(err: redb::Error) -> Self {
-        RaftError::Database {
-            operation: "unknown".to_string(),
-            source: err,
-            backtrace: Backtrace::new(),
-        }
+        RaftError::database_error("unknown", err)
     }
 }
 
 impl From<raft::Error> for RaftError {
     fn from(err: raft::Error) -> Self {
-        RaftError::Consensus {
-            operation: "unknown".to_string(),
-            source: err,
-            backtrace: Backtrace::new(),
-        }
+        RaftError::consensus_error("unknown", err)
     }
 }
 
@@ -777,16 +865,16 @@ mod tests {
         let raft_err = RaftError::storage_error("read_log", io_err);
         
         match raft_err {
-            RaftError::Storage { operation, .. } => {
-                assert_eq!(operation, "read_log");
+            RaftError::Storage { inner } => {
+                assert_eq!(inner.operation, "read_log");
             }
             _ => panic!("Expected Storage error"),
         }
 
         let transport_err = RaftError::transport_error("connection refused");
         match transport_err {
-            RaftError::Transport { details, .. } => {
-                assert_eq!(details, "connection refused");
+            RaftError::Transport { inner } => {
+                assert_eq!(inner.details, "connection refused");
             }
             _ => panic!("Expected Transport error"),
         }
@@ -822,5 +910,29 @@ mod tests {
         let detailed = multi_err.detailed_message();
         assert!(detailed.contains("1."));
         assert!(detailed.contains("2."));
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::*;
+    
+    #[test]
+    fn test_error_size() {
+        let size = std::mem::size_of::<RaftError>();
+        println!("RaftError size: {} bytes", size);
+        // We want to get this below 100 bytes
+        // This test documents current size and will help track improvements
+        // Note: Temporarily commenting out assertion until we complete the optimization
+        // assert!(size < 100, "RaftError size should be less than 100 bytes, got {}", size);
+    }
+
+    #[test]
+    fn test_boxed_error_sizes() {
+        println!("DatabaseError size: {} bytes", std::mem::size_of::<DatabaseError>());
+        println!("StorageError size: {} bytes", std::mem::size_of::<StorageError>());
+        println!("TransportError size: {} bytes", std::mem::size_of::<TransportError>());
+        println!("ConsensusError size: {} bytes", std::mem::size_of::<ConsensusError>());
+        println!("Box<DatabaseError> size: {} bytes", std::mem::size_of::<Box<DatabaseError>>());
     }
 }

@@ -116,15 +116,15 @@ impl SharedNodeState {
     }
     
     /// Register a node
-    pub async fn register_node(&self, cluster_id: u64, iroh_id: String, addr: NodeAddr) {
+    pub async fn register_node(&self, cluster_id: u64, iroh_id: String, _addr: NodeAddr) {
         // For now, just update the peer info
-        if let Some(mut peer) = self.state.write().await.peers.get_mut(&cluster_id) {
+        if let Some(peer) = self.state.write().await.peers.get_mut(&cluster_id) {
             peer.p2p_node_id = Some(iroh_id);
         }
     }
     
     /// Get node address for a peer
-    pub async fn get_node_addr(&self, peer_id: u64) -> Option<NodeAddr> {
+    pub async fn get_node_addr(&self, _peer_id: u64) -> Option<NodeAddr> {
         // This is a placeholder - proper implementation would convert PeerInfo to NodeAddr
         None
     }

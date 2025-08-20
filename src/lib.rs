@@ -55,10 +55,23 @@ pub mod storage;
 /// over peer-to-peer networks, primarily using the Iroh networking stack.
 pub mod transport;
 
+pub mod cluster;
+pub mod admin;
+
 // Other modules are under development and will be added incrementally
 // pub mod node;
 pub mod raft;
 // pub mod discovery;
+
+// Experimental modules - temporarily disabled for core fixes
+// pub mod actor_patterns;
+// pub mod backpressure;
+// pub mod circuit_breaker;
+// pub mod timeout_manager;
+// pub mod lock_free;
+
+// Management modules (Iroh-native P2P)
+pub mod management;
 
 // Optional modules
 #[cfg(feature = "metrics-otel")]
@@ -77,15 +90,28 @@ pub use crate::config::{Config, ConfigBuilder, ConfigError, ConfigResult};
 pub use crate::error::{RaftError as Error, Result};
 pub use crate::types::{NodeId, ProposalData};
 
-// Re-export generic state machine components
+// High-level cluster API exports
+pub use crate::cluster::{
+    RaftCluster, ClusterStatus, ClusterInfo, HealthStatus, Health, ClusterMetrics,
+    MemberConfig, MemberInfo, NodeRole, AdminOps
+};
+
+// Administrative operations exports
+pub use crate::admin::{
+    AdminOps as AdminOperations, HealthChecker, MaintenanceOps,
+    ClusterMonitor, MaintenanceNeeded
+};
+
+// State machine API exports
 pub use crate::raft::{
     ExampleRaftStateMachine, GenericRaftStateMachine, KvCommand, KvState, KeyValueStore,
-    StateMachine,
+    StateMachine
 };
 
 // Core transport and storage exports
 pub use crate::storage::RaftStorage;
 pub use crate::transport::RaftProtocolHandler;
+
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -96,10 +122,20 @@ pub mod prelude {
     pub use crate::error::{RaftError as Error, Result};
     pub use crate::types::{NodeId, ProposalData};
 
-    // Re-export generic state machine components
+    // High-level cluster API
+    pub use crate::cluster::{
+        RaftCluster, ClusterStatus, ClusterInfo, HealthStatus, Health,
+        MemberConfig, NodeRole, AdminOps
+    };
+
+    // State machine API
     pub use crate::raft::{
-        ExampleRaftStateMachine, GenericRaftStateMachine, KvCommand, KvState, KeyValueStore,
-        StateMachine,
+        StateMachine, KeyValueStore, KvCommand
+    };
+
+    // Administrative operations
+    pub use crate::admin::{
+        AdminOps as AdminOperations, HealthChecker, MaintenanceOps
     };
 
     // Re-export key Raft types

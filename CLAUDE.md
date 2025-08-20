@@ -157,11 +157,19 @@ The transport and storage modules provide pluggable interfaces, allowing differe
 
 ### New Features and Capabilities
 
+#### Iroh-Native P2P Management
+- **100% P2P Architecture**: All operations over QUIC streams, no HTTP dependencies
+- **Custom ALPN Protocols**: `iroh-raft/0`, `iroh-raft-mgmt/0`, `iroh-raft-discovery/0`
+- **Service Discovery**: Automatic cluster formation using Iroh's P2P discovery
+- **P2P Event Streaming**: Real-time cluster events without WebSockets
+- **Role-Based Access**: Authentication integrated with Iroh peer IDs
+
 #### Performance Optimizations
 - **Zero-Copy Messaging**: `ZeroCopyMessage` struct with `Cow<[u8]>` payloads
 - **Streaming Support**: Automatic chunking for large messages (>64KB)
 - **Connection Pooling**: Configurable connection reuse with health monitoring
 - **Fast Serialization**: Optimized Raft message processing with prost
+- **Lock-Free Structures**: Actor patterns and dashmap for zero contention
 
 #### Observability
 - **OpenTelemetry Integration**: Comprehensive metrics with `MetricsRegistry`
@@ -175,3 +183,5 @@ The transport and storage modules provide pluggable interfaces, allowing differe
 - **Health Monitoring**: Connection health checks and automatic cleanup
 - **Configuration Validation**: Comprehensive config validation with builder pattern
 - **Resource Management**: Automatic cleanup of connections, memory, and file handles
+- **Circuit Breakers**: Fault isolation with adaptive timeout management
+- **Backpressure Control**: Flow control for preventing overload

@@ -7,6 +7,7 @@
 
 use crate::error::RaftError;
 use raft::prelude::Entry;
+use std::future::Future;
 // Removed unused imports
 
 /// Result type for state machine operations
@@ -24,8 +25,14 @@ pub type StateMachineResult<T> = Result<T, RaftError>;
 pub trait StateMachine: Send + Sync + 'static {
     /// Command type that can be applied to the state machine
     type Command: serde::Serialize + serde::de::DeserializeOwned + Send + Sync;
-    /// State type that represents the complete state of the state machine
     type State: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync;
+    /// Response type returned by commands
+    type Response: serde::Serialize + serde::de::DeserializeOwned + Send + Sync;
+    /// Query type for read-only operations
+    type Query: serde::Serialize + serde::de::DeserializeOwned + Send + Sync;
+    /// Query response type
+    type QueryResponse: serde::Serialize + serde::de::DeserializeOwned + Send + Sync;
+    
     /// Apply a command from a Raft log entry to update the state machine.
     /// 
     /// This method is called for each committed log entry in order.
@@ -36,9 +43,8 @@ pub trait StateMachine: Send + Sync + 'static {
     /// - `command`: The command to apply, deserialized from the log entry
     /// 
     /// # Returns
-    /// - `Ok(())` if the command was applied successfully
-    /// - `Err(error)` if there was an error applying the command
-    async fn apply_command(&mut self, command: Self::Command) -> Result<(), RaftError>;
+    /// - `Ok(response)` containing the command result
+    fn apply_command(&mut self, command: Self::Command) -> impl Future<Output = Result<Self::Response, RaftError>> + Send + '_;
 
     /// Create a snapshot of the current state for efficient state transfer.
     /// 
@@ -49,7 +55,7 @@ pub trait StateMachine: Send + Sync + 'static {
     /// # Returns
     /// - `Ok(state)` containing the current state snapshot
     /// - `Err(error)` if there was an error creating the snapshot
-    async fn create_snapshot(&self) -> Result<Self::State, RaftError>;
+    fn create_snapshot(&self) -> impl Future<Output = Result<Self::State, RaftError>> + Send + '_;
 
     /// Restore the state machine from a snapshot.
     /// 
@@ -63,7 +69,7 @@ pub trait StateMachine: Send + Sync + 'static {
     /// # Returns
     /// - `Ok(())` if the state was restored successfully  
     /// - `Err(error)` if there was an error restoring from the snapshot
-    async fn restore_from_snapshot(&mut self, snapshot: Self::State) -> Result<(), RaftError>;
+    fn restore_from_snapshot(&mut self, snapshot: Self::State) -> impl Future<Output = Result<(), RaftError>> + Send + '_;
 
     /// Get a read-only view of the current state.
     /// 
@@ -73,6 +79,19 @@ pub trait StateMachine: Send + Sync + 'static {
     /// # Returns
     /// A reference to the current state
     fn get_current_state(&self) -> &Self::State;
+
+    /// Execute a read-only query on the state machine.
+    /// 
+    /// This method allows applications to perform read-only operations
+    /// without going through the Raft consensus process.
+    /// 
+    /// # Parameters
+    /// - `query`: The query to execute
+    /// 
+    /// # Returns
+    /// - `Ok(response)` containing the query result
+    /// - `Err(error)` if there was an error executing the query
+    fn execute_query(&self, query: Self::Query) -> impl Future<Output = Result<Self::QueryResponse, RaftError>> + Send + '_;
 }
 
 /// Generic wrapper that implements the actual Raft state machine processing
@@ -103,10 +122,14 @@ where
     /// 
     /// This method handles the deserialization of the entry data and delegates
     /// to the application's StateMachine implementation.
-    pub async fn apply_entry(&mut self, entry: &Entry) -> Result<(), RaftError> {
+    pub async fn apply_entry(&mut self, entry: &Entry) -> Result<T::Response, RaftError> {
         // Skip empty entries
         if entry.data.is_empty() {
-            return Ok(());
+            return Err(RaftError::InvalidInput {
+                parameter: "entry".to_string(),
+                message: "Entry data is empty".to_string(),
+                backtrace: snafu::Backtrace::new(),
+            });
         }
 
         // Deserialize the command from the entry data
@@ -136,6 +159,14 @@ where
     /// Get access to the underlying state machine
     pub fn inner(&self) -> &T {
         &self.inner
+    }
+
+
+    /// Execute a read-only query on the state machine
+    /// 
+    /// This method executes queries without going through Raft consensus
+    pub async fn execute_query(&self, query: T::Query) -> Result<T::QueryResponse, RaftError> {
+        self.inner.execute_query(query).await
     }
 
     /// Get mutable access to the underlying state machine

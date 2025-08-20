@@ -7,9 +7,10 @@
 
 use iroh_raft::transport::iroh::{IrohRaftTransport, IrohRaftMetrics};
 use iroh_raft::transport::shared::SharedNodeState;
-use iroh_raft::types::{NodeId, PeerInfo, ClusterInfo};
-use iroh_raft::discovery::registry::NodeRegistry;
-use iroh_raft::test_helpers::{create_temp_dir, TestNode};
+use iroh_raft::types::NodeId;
+use iroh_raft::transport::shared::PeerInfo;
+// use iroh_raft::discovery::registry::NodeRegistry;
+// use iroh_raft::test_helpers::{create_temp_dir, TestNode};
 use raft::prelude::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,18 +26,9 @@ async fn create_test_transport(
     node_id: NodeId,
     port: u16,
 ) -> Result<(IrohRaftTransport, Arc<SharedNodeState>, Endpoint), Box<dyn std::error::Error>> {
-    let temp_dir = create_temp_dir()?;
-    let cluster_info = ClusterInfo {
-        cluster_id: "test-cluster".to_string(),
-        nodes: HashMap::new(),
-    };
-    
-    let node_registry = Arc::new(NodeRegistry::new());
-    let shared_state = Arc::new(SharedNodeState::new(
-        node_id,
-        cluster_info,
-        node_registry,
-    ));
+    let _temp_dir = tempfile::tempdir()?;
+    let (raft_tx, _raft_rx) = mpsc::unbounded_channel();
+    let shared_state = Arc::new(SharedNodeState::new(node_id, raft_tx));
     
     let endpoint = Endpoint::builder()
         .alpns(vec![b"test-protocol".to_vec()])
@@ -66,18 +58,14 @@ async fn add_test_peer(
 ) {
     let peer_info = PeerInfo {
         node_id: peer_id,
-        address: format!("127.0.0.1:{}", port),
+        public_key: endpoint.node_id(),
+        address: Some(format!("127.0.0.1:{}", port)),
         p2p_node_id: Some(endpoint.node_id().to_string()),
         p2p_addresses: vec![format!("127.0.0.1:{}", port)],
         p2p_relay_url: None,
     };
     
-    shared_state.add_peer(peer_id, peer_info).await;
-    
-    // Also add to node registry
-    let node_addr = NodeAddr::new(endpoint.node_id())
-        .with_direct_addresses([format!("127.0.0.1:{}", port).parse::<SocketAddr>().unwrap()]);
-    shared_state.node_registry().register_node(peer_id, node_addr).await;
+    shared_state.add_peer(peer_info).await;
 }
 
 /// Test basic connection pooling functionality
@@ -95,7 +83,7 @@ async fn test_connection_reuse() -> Result<(), Box<dyn std::error::Error>> {
     transport2.start().await?;
     
     // Send first message
-    let mut msg1 = Message::new();
+    let mut msg1 = Message::default();
     msg1.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg1.from = 1;
     msg1.to = 2;
@@ -140,7 +128,7 @@ async fn test_stale_connection_cleanup() -> Result<(), Box<dyn std::error::Error
     transport2.start().await?;
     
     // Send message to establish connection
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -159,7 +147,7 @@ async fn test_stale_connection_cleanup() -> Result<(), Box<dyn std::error::Error
     tokio::time::sleep(Duration::from_millis(100)).await;
     
     // Try to send another message (should create new connection)
-    let mut msg2 = Message::new();
+    let mut msg2 = Message::default();
     msg2.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg2.from = 1;
     msg2.to = 2;
@@ -196,7 +184,7 @@ async fn test_concurrent_connection_access() -> Result<(), Box<dyn std::error::E
     for i in 0..10 {
         let transport = transport1_arc.clone();
         let handle = tokio::spawn(async move {
-            let mut msg = Message::new();
+            let mut msg = Message::default();
             msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
             msg.from = 1;
             msg.to = 2;
@@ -244,7 +232,7 @@ async fn test_connection_health_checks() -> Result<(), Box<dyn std::error::Error
     transport2.start().await?;
     
     // Establish connection
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -301,13 +289,13 @@ async fn test_connection_pool_metrics() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(metrics_initial.messages_sent, 0);
     
     // Send messages to establish connections
-    let mut msg1 = Message::new();
+    let mut msg1 = Message::default();
     msg1.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg1.from = 1;
     msg1.to = 2;
     msg1.term = 1;
     
-    let mut msg2 = Message::new();
+    let mut msg2 = Message::default();
     msg2.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg2.from = 1;
     msg2.to = 3;
@@ -323,7 +311,7 @@ async fn test_connection_pool_metrics() -> Result<(), Box<dyn std::error::Error>
     
     // Send more messages to same peers (should reuse connections)
     for i in 0..5 {
-        let mut msg = Message::new();
+        let mut msg = Message::default();
         msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
         msg.from = 1;
         msg.to = 2;
@@ -374,7 +362,7 @@ proptest! {
             // Send messages to targets
             for i in 0..message_count {
                 for &target_id in &target_nodes {
-                    let mut msg = Message::new();
+                    let mut msg = Message::default();
                     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
                     msg.from = 1;
                     msg.to = target_id;
@@ -398,7 +386,9 @@ proptest! {
             prop_assert!(!transport.is_shutting_down());
             
             transport.shutdown().await;
-        });
+            
+            Ok(())
+        })?;
     }
 }
 
@@ -417,7 +407,7 @@ async fn test_connection_pool_shutdown() -> Result<(), Box<dyn std::error::Error
     transport2.start().await?;
     
     // Establish connection
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -441,7 +431,7 @@ async fn test_connection_pool_shutdown() -> Result<(), Box<dyn std::error::Error
     assert!(transport1.is_shutting_down());
     
     // Verify that new messages are rejected
-    let mut msg2 = Message::new();
+    let mut msg2 = Message::default();
     msg2.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg2.from = 1;
     msg2.to = 2;
@@ -464,17 +454,18 @@ async fn test_connection_pool_error_handling() -> Result<(), Box<dyn std::error:
     // Add a peer with invalid connection info
     let invalid_peer = PeerInfo {
         node_id: 999,
-        address: "invalid-address".to_string(),
+        public_key: iroh::PublicKey::from_bytes(&[0u8; 32]).unwrap(),
+        address: Some("invalid-address".to_string()),
         p2p_node_id: Some("invalid-node-id".to_string()),
         p2p_addresses: vec!["invalid-address".to_string()],
         p2p_relay_url: None,
     };
-    shared_state.add_peer(999, invalid_peer).await;
+    shared_state.add_peer(invalid_peer).await;
     
     transport.start().await?;
     
     // Try to send message to invalid peer
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 999;
@@ -508,7 +499,7 @@ async fn test_connection_reuse_performance() -> Result<(), Box<dyn std::error::E
     transport2.start().await?;
     
     // Measure first connection time
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;

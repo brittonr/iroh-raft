@@ -7,9 +7,8 @@
 
 use iroh_raft::transport::iroh::IrohRaftTransport;
 use iroh_raft::transport::shared::SharedNodeState;
-use iroh_raft::types::{NodeId, PeerInfo, ClusterInfo};
-use iroh_raft::discovery::registry::NodeRegistry;
-use iroh_raft::test_helpers::create_temp_dir;
+use iroh_raft::types::NodeId;
+use iroh_raft::transport::shared::PeerInfo;
 use raft::prelude::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,18 +24,9 @@ async fn create_test_transport(
     node_id: NodeId,
     port: u16,
 ) -> Result<(IrohRaftTransport, Arc<SharedNodeState>, Endpoint), Box<dyn std::error::Error>> {
-    let temp_dir = create_temp_dir()?;
-    let cluster_info = ClusterInfo {
-        cluster_id: "test-cluster".to_string(),
-        nodes: HashMap::new(),
-    };
-    
-    let node_registry = Arc::new(NodeRegistry::new());
-    let shared_state = Arc::new(SharedNodeState::new(
-        node_id,
-        cluster_info,
-        node_registry,
-    ));
+    let _temp_dir = tempfile::tempdir()?;
+    let (raft_tx, _raft_rx) = mpsc::unbounded_channel();
+    let shared_state = Arc::new(SharedNodeState::new(node_id, raft_tx));
     
     let endpoint = Endpoint::builder()
         .alpns(vec![b"test-protocol".to_vec()])
@@ -66,18 +56,14 @@ async fn add_test_peer(
 ) {
     let peer_info = PeerInfo {
         node_id: peer_id,
-        address: format!("127.0.0.1:{}", port),
+        public_key: endpoint.node_id(),
+        address: Some(format!("127.0.0.1:{}", port)),
         p2p_node_id: Some(endpoint.node_id().to_string()),
         p2p_addresses: vec![format!("127.0.0.1:{}", port)],
         p2p_relay_url: None,
     };
     
-    shared_state.add_peer(peer_id, peer_info).await;
-    
-    // Also add to node registry
-    let node_addr = NodeAddr::new(endpoint.node_id())
-        .with_direct_addresses([format!("127.0.0.1:{}", port).parse::<SocketAddr>().unwrap()]);
-    shared_state.node_registry().register_node(peer_id, node_addr).await;
+    shared_state.add_peer(peer_info).await;
 }
 
 /// Test basic graceful shutdown
@@ -120,7 +106,7 @@ async fn test_shutdown_with_active_connections() -> Result<(), Box<dyn std::erro
     transport2.start().await?;
     
     // Establish connections by sending messages
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -225,17 +211,20 @@ async fn test_task_cancellation() -> Result<(), Box<dyn std::error::Error>> {
     transport1.start().await?;
     transport2.start().await?;
     
+    let transport1_arc = Arc::new(transport1);
+    
     // Send messages to create background activity
     for i in 0..10 {
-        let mut msg = Message::new();
+        let mut msg = Message::default();
         msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
         msg.from = 1;
         msg.to = 2;
         msg.term = i + 1;
         
         // Don't wait for send to complete to keep tasks busy
+        let transport = transport1_arc.clone();
         let _ = tokio::spawn(async move {
-            let _ = transport1.send_message(2, msg).await;
+            let _ = transport.send_message(2, msg).await;
         });
     }
     
@@ -244,7 +233,7 @@ async fn test_task_cancellation() -> Result<(), Box<dyn std::error::Error>> {
     
     // Shutdown should cancel tasks cleanly
     let shutdown_start = Instant::now();
-    transport1.shutdown().await;
+    transport1_arc.shutdown().await;
     let shutdown_duration = shutdown_start.elapsed();
     
     // Should complete quickly even with active tasks
@@ -271,7 +260,7 @@ async fn test_metrics_recording_on_shutdown() -> Result<(), Box<dyn std::error::
     transport2.start().await?;
     
     // Establish connections and send messages
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -320,7 +309,7 @@ async fn test_shutdown_during_message_sending() -> Result<(), Box<dyn std::error
                     break;
                 }
                 
-                let mut msg = Message::new();
+                let mut msg = Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
                 msg.from = 1;
                 msg.to = 2;
@@ -403,7 +392,7 @@ async fn test_shutdown_rejects_new_operations() -> Result<(), Box<dyn std::error
     assert!(transport.is_shutting_down());
     
     // Try to send a message after shutdown
-    let mut msg = Message::new();
+    let mut msg = Message::default();
     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     msg.from = 1;
     msg.to = 2;
@@ -424,7 +413,7 @@ proptest! {
         shutdown_delay_ms in 0u64..200,
     ) {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        rt.block_on(async move {
             let (transport, shared_state, _endpoint) = create_test_transport(1, 6100).await.unwrap();
             
             // Add peers
@@ -438,13 +427,14 @@ proptest! {
                 
                 let peer_info = PeerInfo {
                     node_id: (i + 2) as u64,
-                    address: format!("127.0.0.1:{}", 6200 + i),
+                    public_key: peer_endpoint.node_id(),
+                    address: Some(format!("127.0.0.1:{}", 6200 + i)),
                     p2p_node_id: Some(peer_endpoint.node_id().to_string()),
                     p2p_addresses: vec![format!("127.0.0.1:{}", 6200 + i)],
                     p2p_relay_url: None,
                 };
                 
-                shared_state.add_peer((i + 2) as u64, peer_info).await;
+                shared_state.add_peer(peer_info).await;
             }
             
             transport.start().await.unwrap();
@@ -452,7 +442,7 @@ proptest! {
             // Send some messages
             for i in 0..num_messages {
                 for peer in 0..num_peers {
-                    let mut msg = Message::new();
+                    let mut msg = Message::default();
                     msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
                     msg.from = 1;
                     msg.to = (peer + 2) as u64;
@@ -481,7 +471,7 @@ proptest! {
             prop_assert!(transport.is_shutting_down());
             
             // 3. New operations should be rejected
-            let mut test_msg = Message::new();
+            let mut test_msg = Message::default();
             test_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
             test_msg.from = 1;
             test_msg.to = 2;
@@ -489,7 +479,9 @@ proptest! {
             
             let send_result = transport.send_message(2, test_msg).await;
             prop_assert!(send_result.is_err());
-        });
+            
+            Ok(())
+        })?;
     }
 }
 
@@ -509,7 +501,7 @@ async fn test_shutdown_resource_cleanup() -> Result<(), Box<dyn std::error::Erro
     
     // Create some activity to allocate resources
     for i in 0..5 {
-        let mut msg = Message::new();
+        let mut msg = Message::default();
         msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
         msg.from = 1;
         msg.to = 2;
@@ -566,7 +558,7 @@ async fn test_multiple_shutdown_sequences() -> Result<(), Box<dyn std::error::Er
         transport.start().await?;
         
         // Send a test message
-        let mut msg = Message::new();
+        let mut msg = Message::default();
         msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
         msg.from = 1;
         msg.to = 2;

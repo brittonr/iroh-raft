@@ -4,7 +4,7 @@
 //! including support for builder pattern construction, environment variable overrides,
 //! and validation.
 //!
-//! # Examples
+//! #[derive(Debug, Clone, Serialize, Deserialize, Default)]Examples
 //!
 //! ```rust,no_run
 //! use iroh_raft::config::{Config, ConfigBuilder};
@@ -242,20 +242,20 @@ pub struct TransportConfig {
 /// This configuration controls how the transport layer manages connections to peer nodes,
 /// including connection pooling, timeouts, and resource limits.
 /// 
-/// # Connection Pooling
+/// #[derive(Debug, Clone, Serialize, Deserialize, Default)]Connection Pooling
 /// 
 /// When `enable_pooling` is true, the transport layer will maintain a pool of connections
 /// to each peer and reuse them for multiple messages. This reduces connection overhead
 /// and improves throughput, especially for high-frequency communications.
 /// 
-/// # Resource Limits
+/// #[derive(Debug, Clone, Serialize, Deserialize, Default)]Resource Limits
 /// 
 /// The configuration provides several knobs to control resource usage:
 /// - `max_connections_per_peer`: Limits memory and file descriptor usage
 /// - `max_message_size`: Prevents DoS attacks with oversized messages
 /// - `idle_timeout`: Automatically closes unused connections to free resources
 /// 
-/// # Example
+/// #[derive(Debug, Clone, Serialize, Deserialize, Default)]Example
 /// 
 /// ```rust
 /// use iroh_raft::config::ConnectionConfig;
@@ -859,6 +859,95 @@ impl ConfigBuilder {
     pub fn new() -> Self {
         Self {
             config: Config::default(),
+        }
+    }
+    
+    /// Create a configuration builder with development preset
+    /// 
+    /// Optimized for development and testing with faster timeouts and detailed logging
+    pub fn development_preset() -> Self {
+        Self {
+            config: Config {
+                raft: RaftConfig {
+                    election_timeout_min: Duration::from_millis(1000),
+                    election_timeout_max: Duration::from_millis(2000),
+                    heartbeat_interval: Duration::from_millis(250),
+                    ..RaftConfig::default()
+                },
+                observability: ObservabilityConfig {
+                    logging: LoggingConfig {
+                        level: "debug".to_string(),
+                        ..LoggingConfig::default()
+                    },
+                    ..ObservabilityConfig::default()
+                },
+                storage: StorageConfig {
+                    sync_strategy: SyncStrategy::Periodic,
+                    ..StorageConfig::default()
+                },
+                ..Config::default()
+            },
+        }
+    }
+    
+    /// Create a configuration builder with production preset
+    /// 
+    /// Optimized for production with conservative timeouts and minimal logging
+    pub fn production_preset() -> Self {
+        Self {
+            config: Config {
+                raft: RaftConfig {
+                    election_timeout_min: Duration::from_millis(5000),
+                    election_timeout_max: Duration::from_millis(10000),
+                    heartbeat_interval: Duration::from_millis(1000),
+                    ..RaftConfig::default()
+                },
+                observability: ObservabilityConfig {
+                    logging: LoggingConfig {
+                        level: "info".to_string(),
+                        ..LoggingConfig::default()
+                    },
+                    ..ObservabilityConfig::default()
+                },
+                storage: StorageConfig {
+                    sync_strategy: SyncStrategy::OnCommit,
+                    ..StorageConfig::default()
+                },
+                ..Config::default()
+            },
+        }
+    }
+    
+    /// Create a configuration builder with testing preset
+    /// 
+    /// Optimized for unit and integration testing with minimal timeouts
+    pub fn testing_preset() -> Self {
+        Self {
+            config: Config {
+                raft: RaftConfig {
+                    election_timeout_min: Duration::from_millis(500),
+                    election_timeout_max: Duration::from_millis(1000),
+                    heartbeat_interval: Duration::from_millis(100),
+                    ..RaftConfig::default()
+                },
+                observability: ObservabilityConfig {
+                    logging: LoggingConfig {
+                        level: "warn".to_string(),
+                        ..LoggingConfig::default()
+                    },
+                    metrics: MetricsConfig {
+                        enabled: false,
+                        ..MetricsConfig::default()
+                    },
+                    ..ObservabilityConfig::default()
+                },
+                storage: StorageConfig {
+                    backend: StorageBackend::Memory,
+                    sync_strategy: SyncStrategy::None,
+                    ..StorageConfig::default()
+                },
+                ..Config::default()
+            },
         }
     }
     

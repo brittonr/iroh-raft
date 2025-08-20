@@ -28,6 +28,43 @@ pub enum KvCommand {
     Clear,
 }
 
+/// Response type for KV commands
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KvResponse {
+    /// Command executed successfully
+    Ok,
+    /// Value retrieved from get operation
+    Value(Option<String>),
+    /// Keys returned from list operation
+    Keys(Vec<String>),
+}
+
+/// Query type for read-only KV operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KvQuery {
+    /// Get a value by key
+    Get { key: String },
+    /// List all keys with optional prefix
+    List { prefix: Option<String> },
+    /// Check if key exists
+    Exists { key: String },
+    /// Get store size
+    Size,
+}
+
+/// Response type for KV queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KvQueryResponse {
+    /// Value retrieved
+    Value(Option<String>),
+    /// Keys returned
+    Keys(Vec<String>),
+    /// Boolean result
+    Boolean(bool),
+    /// Numeric result
+    Number(usize),
+}
+
 /// State of the key-value store
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvState {
@@ -128,8 +165,10 @@ impl Default for KeyValueStore {
 impl StateMachine for KeyValueStore {
     type Command = KvCommand;
     type State = KvState;
-
-    async fn apply_command(&mut self, command: Self::Command) -> Result<(), crate::error::RaftError> {
+    type Response = KvResponse;
+    type Query = KvQuery;
+    type QueryResponse = KvQueryResponse;
+    async fn apply_command(&mut self, command: Self::Command) -> Result<Self::Response, crate::error::RaftError> {
         debug!("Applying KV command: {:?}", command);
 
         match command {
@@ -163,7 +202,7 @@ impl StateMachine for KeyValueStore {
             }
         }
 
-        Ok(())
+        Ok(KvResponse::Ok)
     }
 
     async fn create_snapshot(&self) -> Result<Self::State, crate::error::RaftError> {
@@ -192,6 +231,39 @@ impl StateMachine for KeyValueStore {
 
     fn get_current_state(&self) -> &Self::State {
         &self.state
+    }
+
+    async fn execute_query(&self, query: Self::Query) -> Result<Self::QueryResponse, crate::error::RaftError> {
+        debug!("Executing KV query: {:?}", query);
+
+        match query {
+            KvQuery::Get { key } => {
+                let value = self.state.data.get(&key).cloned();
+                Ok(KvQueryResponse::Value(value))
+            }
+            
+            KvQuery::List { prefix } => {
+                let keys: Vec<String> = if let Some(prefix) = prefix {
+                    self.state.data.keys()
+                        .filter(|k| k.starts_with(&prefix))
+                        .cloned()
+                        .collect()
+                } else {
+                    self.state.data.keys().cloned().collect()
+                };
+                Ok(KvQueryResponse::Keys(keys))
+            }
+            
+            KvQuery::Exists { key } => {
+                let exists = self.state.data.contains_key(&key);
+                Ok(KvQueryResponse::Boolean(exists))
+            }
+            
+            KvQuery::Size => {
+                let size = self.state.data.len();
+                Ok(KvQueryResponse::Number(size))
+            }
+        }
     }
 }
 

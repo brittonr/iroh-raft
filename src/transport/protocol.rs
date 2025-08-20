@@ -711,26 +711,6 @@ impl RaftProtocolHandler {
         }
     }
     
-    /// Process a single message and send response (legacy - kept for compatibility)
-    async fn process_message<S>(
-        send: &mut S,
-        header: MessageHeader,
-        payload: Vec<u8>,
-        raft_rx_tx: mpsc::UnboundedSender<(u64, raft::prelude::Message)>,
-    ) -> Result<()>
-    where
-        S: AsyncWriteExt + Unpin,
-    {
-        let message = ZeroCopyMessage {
-            msg_type: header.msg_type,
-            request_id: header.request_id,
-            payload: Cow::Owned(payload),
-            total_size: 0, // Not used in this path
-        };
-        
-        Self::process_message_zero_copy(send, message, raft_rx_tx).await
-    }
-
     /// Process a zero-copy message and send response with optimized performance
     async fn process_message_zero_copy<S>(
         send: &mut S,
@@ -756,76 +736,6 @@ impl RaftProtocolHandler {
         result
     }
     
-    /// Handle RPC request and send response
-    async fn handle_rpc_request<S>(
-        send: &mut S,
-        header: MessageHeader,
-        payload: Vec<u8>,
-        raft_rx_tx: mpsc::UnboundedSender<(u64, raft::prelude::Message)>,
-    ) -> Result<()>
-    where
-        S: AsyncWriteExt + Unpin,
-    {
-        let request: RpcRequest = deserialize_payload(&payload)?;
-        
-        let response = if request.service == "raft" && request.method == "raft.message" {
-            // Deserialize Raft message
-            let message: raft::prelude::Message =
-                crate::raft::messages::deserialize_message(&request.payload)?;
-
-            // Get the sender's node ID from the message
-            let from = message.from;
-
-            // Send to Raft manager
-            if let Err(e) = raft_rx_tx.send((from, message)) {
-                tracing::error!("Failed to send Raft message to manager: {}", e);
-                RpcResponse {
-                    success: false,
-                    payload: None,
-                    error: Some(format!("Failed to process message: {}", e)),
-                }
-            } else {
-                RpcResponse {
-                    success: true,
-                    payload: None,
-                    error: None,
-                }
-            }
-        } else {
-            // Unknown service/method
-            RpcResponse {
-                success: false,
-                payload: None,
-                error: Some(format!("Unknown service/method: {}/{}", request.service, request.method)),
-            }
-        };
-        
-        let response_bytes = serialize_payload(&response)?;
-        write_message(
-            send,
-            MessageType::Response,
-            header.request_id,
-            &response_bytes,
-        ).await?;
-        
-        Ok(())
-    }
-    
-    /// Handle direct Raft message (legacy path)
-    async fn handle_direct_raft_message(
-        payload: Vec<u8>,
-        raft_rx_tx: mpsc::UnboundedSender<(u64, raft::prelude::Message)>,
-    ) -> Result<()> {
-        let message = crate::raft::messages::deserialize_message(&payload)?;
-        let from = message.from;
-        
-        if let Err(e) = raft_rx_tx.send((from, message)) {
-            tracing::error!("Failed to send Raft message to manager: {}", e);
-        }
-        
-        Ok(())
-    }
-
     /// Handle RPC request with zero-copy optimizations
     async fn handle_rpc_request_zero_copy<S>(
         send: &mut S,

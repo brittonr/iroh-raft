@@ -17,14 +17,7 @@ pub type NodeId = u64;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ProposalData {
     /// Key-value store operation
-    KeyValue { 
-        /// The operation type
-        op: KeyValueOp, 
-        /// The key to operate on
-        key: String, 
-        /// The value (for set operations)
-        value: Option<String> 
-    },
+    KeyValue(KeyValueOp),
     /// Raw bytes
     Raw(Vec<u8>),
     /// Text data
@@ -33,43 +26,28 @@ pub enum ProposalData {
     Noop,
 }
 
-/// Key-value operations
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum KeyValueOp {
-    /// Set a key to a value
-    Set,
-    /// Get the value of a key
-    Get,
-    /// Delete a key
-    Delete,
-}
 
 impl ProposalData {
     /// Create a key-value set operation
     pub fn set(key: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::KeyValue {
-            op: KeyValueOp::Set,
+        Self::KeyValue(KeyValueOp::Set {
             key: key.into(),
-            value: Some(value.into()),
-        }
+            value: value.into(),
+        })
     }
 
     /// Create a key-value get operation
     pub fn get(key: impl Into<String>) -> Self {
-        Self::KeyValue {
-            op: KeyValueOp::Get,
+        Self::KeyValue(KeyValueOp::Get {
             key: key.into(),
-            value: None,
-        }
+        })
     }
 
     /// Create a key-value delete operation
     pub fn delete(key: impl Into<String>) -> Self {
-        Self::KeyValue {
-            op: KeyValueOp::Delete,
+        Self::KeyValue(KeyValueOp::Delete {
             key: key.into(),
-            value: None,
-        }
+        })
     }
 
     /// Create a text proposal
@@ -91,11 +69,12 @@ impl ProposalData {
 impl fmt::Display for ProposalData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProposalData::KeyValue { op, key, value } => {
+            ProposalData::KeyValue(op) => {
                 match op {
-                    KeyValueOp::Set => write!(f, "SET {} = {:?}", key, value),
-                    KeyValueOp::Get => write!(f, "GET {}", key),
-                    KeyValueOp::Delete => write!(f, "DELETE {}", key),
+                    KeyValueOp::Set { key, value } => write!(f, "SET {} = {}", key, value),
+                    KeyValueOp::Get { key } => write!(f, "GET {}", key),
+                    KeyValueOp::Delete { key } => write!(f, "DELETE {}", key),
+                    KeyValueOp::List { prefix } => write!(f, "LIST {:?}", prefix),
                 }
             }
             ProposalData::Raw(bytes) => write!(f, "RAW({} bytes)", bytes.len()),
@@ -166,6 +145,118 @@ impl Default for VmStatus {
     }
 }
 
+/// Node role in the Raft cluster
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NodeRole {
+    /// Follower node
+    Follower,
+    /// Candidate node (during election)
+    Candidate,
+    /// Leader node
+    Leader,
+}
+
+impl fmt::Display for NodeRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeRole::Follower => write!(f, "follower"),
+            NodeRole::Candidate => write!(f, "candidate"),
+            NodeRole::Leader => write!(f, "leader"),
+        }
+    }
+}
+
+impl Default for NodeRole {
+    fn default() -> Self {
+        NodeRole::Follower
+    }
+}
+
+/// Current status of a Raft node
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NodeStatus {
+    /// The node ID
+    pub node_id: NodeId,
+    /// Current role in the cluster
+    pub role: NodeRole,
+    /// Current term
+    pub term: u64,
+    /// Current leader ID (if known)
+    pub leader_id: Option<NodeId>,
+    /// Last log index
+    pub last_log_index: u64,
+    /// Committed log index
+    pub committed_index: u64,
+    /// Applied log index
+    pub applied_index: u64,
+    /// List of connected peer IDs
+    pub connected_peers: Vec<NodeId>,
+    /// Node uptime in seconds
+    pub uptime_seconds: u64,
+}
+
+impl NodeStatus {
+    /// Create a new node status
+    pub fn new(node_id: NodeId) -> Self {
+        Self {
+            node_id,
+            role: NodeRole::Follower,
+            term: 0,
+            leader_id: None,
+            last_log_index: 0,
+            committed_index: 0,
+            applied_index: 0,
+            connected_peers: Vec::new(),
+            uptime_seconds: 0,
+        }
+    }
+    
+    /// Check if this node is the leader
+    pub fn is_leader(&self) -> bool {
+        self.role == NodeRole::Leader
+    }
+    
+    /// Check if this node is a follower
+    pub fn is_follower(&self) -> bool {
+        self.role == NodeRole::Follower
+    }
+    
+    /// Check if this node is a candidate
+    pub fn is_candidate(&self) -> bool {
+        self.role == NodeRole::Candidate
+    }
+}
+
+impl fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f, 
+            "Node {} [{}] term={} leader={:?} log={}/{}/{} peers={}",
+            self.node_id,
+            self.role,
+            self.term,
+            self.leader_id,
+            self.last_log_index,
+            self.committed_index,
+            self.applied_index,
+            self.connected_peers.len()
+        )
+    }
+}
+
+/// Updated key-value operations with the correct structure expected in the codebase
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum KeyValueOp {
+    /// Set a key to a value
+    Set { key: String, value: String },
+    /// Get the value of a key
+    Get { key: String },
+    /// Delete a key
+    Delete { key: String },
+    /// List keys with optional prefix
+    List { prefix: Option<String> },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,7 +264,7 @@ mod tests {
     #[test]
     fn test_proposal_data() {
         let set_op = ProposalData::set("key1", "value1");
-        assert_eq!(format!("{}", set_op), "SET key1 = Some(\"value1\")");
+        assert_eq!(format!("{}", set_op), "SET key1 = value1");
 
         let get_op = ProposalData::get("key1");
         assert_eq!(format!("{}", get_op), "GET key1");

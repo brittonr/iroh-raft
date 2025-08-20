@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "context7": {
+      "args": [],
+      "command": "/nix/store/18wvd1rgz8qsw0gprvpbwf8wpybbd55n-context7-mcp-1.0.14/bin/context7-mcp",
+      "env": {}
+    },
+    "fetch": {
+      "args": [],
+      "command": "/nix/store/ami5imq040r3s5hc9cvzw7qdk9g4wqic-mcp-server-fetch-2025.7.1/bin/mcp-server-fetch",
+      "env": {}
+    },
+    "git": {
+      "args": [],
+      "command": "/nix/store/wgb2322p3xrwyb74hs8jf3b5nfxsjdrz-mcp-server-git-2025.7.1/bin/mcp-server-git",
+      "env": {}
+    },
+    "memory": {
+      "args": [],
+      "command": "/nix/store/nrv40l1z2gvy9grp5y5q6kb7q3x8qa1w-mcp-server-memory-2025.7.1/bin/mcp-server-memory",
+      "env": {}
+    },
+    "playwright": {
+      "args": [
+        "--executable-path",
+        "/nix/store/8lw5lsr18z7q47kwirs9fps8lhbd7a3n-chromium-139.0.7258.127/bin/chromium"
+      ],
+      "command": "/nix/store/qp4acgzi2szdihmywr21pj8dv6z62ydy-playwright-mcp-0.0.34/bin/mcp-server-playwright",
+      "env": {}
+    },
+    "serena": {
+      "args": [
+        "start-mcp-server"
+      ],
+      "command": "/nix/store/gaqbbha8m9b57a459qx16zkiga99wh4p-serena-0.1.4/bin/serena",
+      "env": {}
+    }
+  }
+}

@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================");
 
     // Create a sample Raft message
-    let mut raft_msg = Message::new();
+    let mut raft_msg = Message::default();
     raft_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
     raft_msg.from = 1;
     raft_msg.to = 2;

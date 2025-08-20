@@ -94,7 +94,7 @@ impl IrohService for IrohRaftService {
                     message.msg_type(), sender_id
                 );
 
-                if let Err(_) = message_tx.send((sender_id, message)) {
+                if message_tx.send((sender_id, message)).is_err() {
                     error!("RAFT_SERVICE: Failed to send message to RaftManager - channel closed");
                     return Err(RaftError::Internal {
                         message: "Failed to forward message to RaftManager - channel closed".to_string(),

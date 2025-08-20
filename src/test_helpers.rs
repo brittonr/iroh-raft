@@ -277,7 +277,7 @@ impl TestCluster {
     /// Remove a node from the cluster
     pub async fn remove_node(&mut self, node_id: NodeId) -> Result<()> {
         let position = self.nodes.iter().position(|n| n.id() == node_id)
-            .ok_or_else(|| crate::error::RaftError::NodeNotFound { node_id, backtrace: Backtrace::new(), })?;
+            .ok_or_else(|| crate::error::RaftError::NodeNotFound { node_id })?;
 
         let mut node = self.nodes.remove(position);
         node.stop().await?;
