@@ -1,39 +1,35 @@
 # iroh-raft
 
-A **production-ready** distributed consensus library that combines Raft consensus with Iroh P2P networking and redb storage, featuring improved ergonomics and comprehensive observability.
-
-## Status
-
-This crate provides a **complete and production-ready** implementation for building distributed consensus systems with **100% Iroh-native P2P architecture**: high-performance QUIC streams for all operations, zero-copy message handling, and built-in discovery without any HTTP dependencies.
+A distributed consensus library that combines Raft consensus with Iroh P2P networking and redb storage, featuring improved ergonomics and comprehensive observability.
 
 ## Features
 
 ### 🚀 **Core Features**
-- ✅ **Simplified RaftCluster API**: Easy-to-use cluster management with minimal boilerplate
-- ✅ **Configuration Presets**: Pre-configured settings for Development, Testing, and Production
-- ✅ **Generic State Machines**: Type-safe, application-specific command handling
-- ✅ **Zero-Copy Optimizations**: High-performance message processing with `Cow<[u8]>` payloads
-- ✅ **Connection Pooling**: Sophisticated connection lifecycle management
-- ✅ **Graceful Shutdown**: Coordinated shutdown procedures with proper resource cleanup
+-  **Simplified RaftCluster API**: Easy-to-use cluster management with minimal boilerplate
+-  **Configuration Presets**: Pre-configured settings for Development, Testing, and Production
+-  **Generic State Machines**: Type-safe, application-specific command handling
+-  **Zero-Copy Optimizations**: High-performance message processing with `Cow<[u8]>` payloads
+-  **Connection Pooling**: Sophisticated connection lifecycle management
+-  **Graceful Shutdown**: Coordinated shutdown procedures with proper resource cleanup
 
 ### 🌐 **Iroh-Native P2P Architecture**
-- ✅ **QUIC Streams**: All operations over high-performance P2P connections
-- ✅ **Custom ALPN Protocols**: `iroh-raft/0`, `iroh-raft-mgmt/0`, `iroh-raft-discovery/0`
-- ✅ **P2P Event Streaming**: Real-time cluster events without WebSockets
-- ✅ **Built-in Discovery**: Automatic cluster formation using Iroh's discovery
+-  **QUIC Streams**: All operations over high-performance P2P connections
+-  **Custom ALPN Protocols**: `iroh-raft/0`, `iroh-raft-mgmt/0`, `iroh-raft-discovery/0`
+-  **P2P Event Streaming**: Real-time cluster events without WebSockets
+-  **Built-in Discovery**: Automatic cluster formation using Iroh's discovery
 
 ### 📊 **Observability & Monitoring**
-- ✅ **Prometheus Metrics**: Comprehensive metrics export
-- ✅ **OpenTelemetry Tracing**: Distributed tracing support
-- ✅ **Health Checks**: Configurable health monitoring
-- ✅ **Performance Monitoring**: Latency histograms and throughput metrics
+-  **Prometheus Metrics**: Comprehensive metrics export
+-  **OpenTelemetry Tracing**: Distributed tracing support
+-  **Health Checks**: Configurable health monitoring
+-  **Performance Monitoring**: Latency histograms and throughput metrics
 
 ### 🔧 **Production Features**
-- ✅ **Deployment Management**: Multi-node cluster bootstrap and management
-- ✅ **Rolling Updates**: Zero-downtime cluster updates
-- ✅ **Dynamic Scaling**: Add/remove nodes during operation
-- ✅ **Backup & Restore**: Automated backup scheduling and disaster recovery
-- ✅ **Error Handling**: Comprehensive error types and recovery strategies
+-  **Deployment Management**: Multi-node cluster bootstrap and management
+-  **Rolling Updates**: Zero-downtime cluster updates
+-  **Dynamic Scaling**: Add/remove nodes during operation
+-  **Backup & Restore**: Automated backup scheduling and disaster recovery
+-  **Error Handling**: Comprehensive error types and recovery strategies
 
 ## Quick Start
 
@@ -432,7 +428,6 @@ The crate follows these principles:
 
 1. **Iroh-Native**: Use Iroh's P2P primitives exclusively - no HTTP dependencies
 2. **Developer Experience**: Intuitive APIs with minimal boilerplate
-3. **Production Ready**: Comprehensive observability and operational features
 4. **Performance**: Zero-copy optimizations and efficient resource usage
 5. **Flexibility**: Generic state machines for any application domain
 6. **Reliability**: Comprehensive testing including deterministic simulation
