@@ -71,6 +71,7 @@ pub mod raft;
 // pub mod lock_free;
 
 // Management modules (Iroh-native P2P)
+#[cfg(feature = "management-api")]
 pub mod management;
 
 // Optional modules
