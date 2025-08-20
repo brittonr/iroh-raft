@@ -79,16 +79,14 @@ mod tests {
             ]
         ) {
             match op {
-                ProposalData::KeyValue { op: KeyValueOp::Set, key, value } => {
-                    prop_assert!(value.is_some(), "Set operations must have a value");
+                ProposalData::KeyValue(KeyValueOp::Set { key, value }) => {
+                    prop_assert!(!value.is_empty(), "Set operations must have a value");
                     prop_assert!(!key.is_empty(), "Keys cannot be empty");
                 }
-                ProposalData::KeyValue { op: KeyValueOp::Get, key, value } => {
-                    prop_assert!(value.is_none(), "Get operations should not have a value");
+                ProposalData::KeyValue(KeyValueOp::Get { key }) => {
                     prop_assert!(!key.is_empty(), "Keys cannot be empty");
                 }
-                ProposalData::KeyValue { op: KeyValueOp::Delete, key, value } => {
-                    prop_assert!(value.is_none(), "Delete operations should not have a value");
+                ProposalData::KeyValue(KeyValueOp::Delete { key }) => {
                     prop_assert!(!key.is_empty(), "Keys cannot be empty");
                 }
                 _ => {} // Other variants are fine
@@ -189,13 +187,13 @@ mod basic_tests {
     #[test]
     fn proposal_data_constructors() {
         let set_op = ProposalData::set("key1", "value1");
-        assert!(matches!(set_op, ProposalData::KeyValue { op: KeyValueOp::Set, .. }));
+        assert!(matches!(set_op, ProposalData::KeyValue(KeyValueOp::Set { .. })));
 
         let get_op = ProposalData::get("key1");
-        assert!(matches!(get_op, ProposalData::KeyValue { op: KeyValueOp::Get, .. }));
+        assert!(matches!(get_op, ProposalData::KeyValue(KeyValueOp::Get { .. })));
 
         let delete_op = ProposalData::delete("key1");
-        assert!(matches!(delete_op, ProposalData::KeyValue { op: KeyValueOp::Delete, .. }));
+        assert!(matches!(delete_op, ProposalData::KeyValue(KeyValueOp::Delete { .. })));
 
         let text_op = ProposalData::text("hello world");
         assert!(matches!(text_op, ProposalData::Text(_)));

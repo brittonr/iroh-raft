@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=======================================");
 
     // Initialize logging
-    tracing_subscriber::init();
+    tracing_subscriber::fmt::init();
 
     // 1. Basic Connection Pool Configuration
     println!("\n1. Basic Connection Pool Configuration:");

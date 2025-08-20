@@ -155,6 +155,9 @@ pub use self::state_machine::{
     KvCommand, KvState, KeyValueStore, StateMachine
 };
 
+// Re-export kv_example types
+pub use self::kv_example::{KvQuery, KvQueryResponse, KvResponse};
+
 // Re-export generic proposals
 pub use self::proposals::{
     BatchProposal, BatchProposalBuilder, GenericProposal, ProposalMetadata

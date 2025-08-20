@@ -59,16 +59,14 @@ mod tests {
                 // Verify key-value operations maintain expected structure
                 for op in operations {
                     match op {
-                        ProposalData::KeyValue { op: KeyValueOp::Set, key, value } => {
-                            prop_assert!(value.is_some(), "Set operations must have a value");
+                        ProposalData::KeyValue(KeyValueOp::Set { key, value }) => {
+                            prop_assert!(!value.is_empty(), "Set operations must have a value");
                             prop_assert!(!key.is_empty(), "Keys cannot be empty");
                         }
-                        ProposalData::KeyValue { op: KeyValueOp::Get, key, value } => {
-                            prop_assert!(value.is_none(), "Get operations should not have a value");
+                        ProposalData::KeyValue(KeyValueOp::Get { key }) => {
                             prop_assert!(!key.is_empty(), "Keys cannot be empty");
                         }
-                        ProposalData::KeyValue { op: KeyValueOp::Delete, key, value } => {
-                            prop_assert!(value.is_none(), "Delete operations should not have a value");
+                        ProposalData::KeyValue(KeyValueOp::Delete { key }) => {
                             prop_assert!(!key.is_empty(), "Keys cannot be empty");
                         }
                         _ => {} // Other variants are fine
@@ -278,9 +276,9 @@ mod tests {
                 let deserialized: ProposalData = serde_json::from_str(&serialized)
                     .expect("Failed to deserialize");
                 
-                if let ProposalData::KeyValue { op: KeyValueOp::Set, key: restored_key, value: restored_value } = deserialized {
+                if let ProposalData::KeyValue(KeyValueOp::Set { key: restored_key, value: restored_value }) = deserialized {
                     prop_assert_eq!(key, restored_key);
-                    prop_assert_eq!(Some(value), restored_value);
+                    prop_assert_eq!(value, restored_value);
                 } else {
                     prop_assert!(false, "Expected KeyValue Set variant");
                 }
@@ -295,13 +293,13 @@ mod tests {
         #[test]
         fn proposal_data_constructors_work() {
             let set_op = ProposalData::set("key1", "value1");
-            assert!(matches!(set_op, ProposalData::KeyValue { op: KeyValueOp::Set, .. }));
+            assert!(matches!(set_op, ProposalData::KeyValue(KeyValueOp::Set { .. })));
 
             let get_op = ProposalData::get("key1");
-            assert!(matches!(get_op, ProposalData::KeyValue { op: KeyValueOp::Get, .. }));
+            assert!(matches!(get_op, ProposalData::KeyValue(KeyValueOp::Get { .. })));
 
             let delete_op = ProposalData::delete("key1");
-            assert!(matches!(delete_op, ProposalData::KeyValue { op: KeyValueOp::Delete, .. }));
+            assert!(matches!(delete_op, ProposalData::KeyValue(KeyValueOp::Delete { .. })));
 
             let text_op = ProposalData::text("hello world");
             assert!(matches!(text_op, ProposalData::Text(_)));

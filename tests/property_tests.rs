@@ -17,6 +17,8 @@ use iroh_raft::{
 };
 
 use proptest::prelude::*;
+use proptest::collection::vec;
+use proptest::string::string_regex;
 use std::time::Duration;
 use std::collections::HashSet;
 
@@ -190,16 +192,14 @@ mod state_machine_tests {
             // Verify key-value operations maintain expected structure
             for op in operations {
                 match op {
-                    ProposalData::KeyValue { op: KeyValueOp::Set, key, value } => {
-                        prop_assert!(value.is_some(), "Set operations must have a value");
+                    ProposalData::KeyValue(KeyValueOp::Set { key, value }) => {
+                        prop_assert!(!value.is_empty(), "Set operations must have a value");
                         prop_assert!(!key.is_empty(), "Keys cannot be empty");
                     }
-                    ProposalData::KeyValue { op: KeyValueOp::Get, key, value } => {
-                        prop_assert!(value.is_none(), "Get operations should not have a value");
+                    ProposalData::KeyValue(KeyValueOp::Get { key }) => {
                         prop_assert!(!key.is_empty(), "Keys cannot be empty");
                     }
-                    ProposalData::KeyValue { op: KeyValueOp::Delete, key, value } => {
-                        prop_assert!(value.is_none(), "Delete operations should not have a value");
+                    ProposalData::KeyValue(KeyValueOp::Delete { key }) => {
                         prop_assert!(!key.is_empty(), "Keys cannot be empty");
                     }
                     _ => {} // Other variants are fine

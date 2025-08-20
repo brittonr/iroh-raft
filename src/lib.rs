@@ -56,6 +56,7 @@ pub mod storage;
 pub mod transport;
 
 pub mod cluster;
+pub mod cluster_api;
 pub mod admin;
 
 // Other modules are under development and will be added incrementally
@@ -63,12 +64,12 @@ pub mod admin;
 pub mod raft;
 // pub mod discovery;
 
-// Experimental modules - temporarily disabled for core fixes
-// pub mod actor_patterns;
-// pub mod backpressure;
-// pub mod circuit_breaker;
-// pub mod timeout_manager;
-// pub mod lock_free;
+// Performance and reliability modules
+pub mod actor_patterns;
+pub mod backpressure;
+pub mod circuit_breaker;
+pub mod timeout_manager;
+pub mod lock_free;
 
 // Management modules (Iroh-native P2P)
 #[cfg(feature = "management-api")]
@@ -94,7 +95,13 @@ pub use crate::types::{NodeId, ProposalData};
 // High-level cluster API exports
 pub use crate::cluster::{
     RaftCluster, ClusterStatus, ClusterInfo, HealthStatus, Health, ClusterMetrics,
-    MemberConfig, MemberInfo, NodeRole, AdminOps
+    MemberConfig, MemberInfo, NodeRole, AdminOps, ClusterStateMachine
+};
+
+// Cluster API exports (simplified high-level interface)
+pub use crate::cluster_api::{
+    // StateMachine as ClusterStateMachine, ClusterBuilder, ClusterHealth,
+    HealthCheck, CheckStatus, NodeInfo, NodeStatus, NodeState, OperationResult
 };
 
 // Administrative operations exports
@@ -113,6 +120,12 @@ pub use crate::raft::{
 pub use crate::storage::RaftStorage;
 pub use crate::transport::RaftProtocolHandler;
 
+// Feature-gated exports
+#[cfg(feature = "test-helpers")]
+pub use crate::test_helpers::{TestCluster, TestNode, TempDir, NodeStatus as TestNodeStatus, ClusterStatus as TestClusterStatus};
+
+#[cfg(feature = "metrics-otel")]
+pub use crate::metrics::{MetricsRegistry, LatencyTimer};
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -131,7 +144,7 @@ pub mod prelude {
 
     // State machine API
     pub use crate::raft::{
-        StateMachine, KeyValueStore, KvCommand
+        StateMachine, KeyValueStore, KvCommand, KvQuery, KvQueryResponse
     };
 
     // Administrative operations

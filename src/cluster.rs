@@ -59,6 +59,16 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+/// Trait alias for state machines used in cluster management
+/// 
+/// This provides a convenient alias for the StateMachine trait specifically
+/// for use in cluster contexts. It's semantically identical to StateMachine
+/// but provides better ergonomics for cluster-specific usage.
+pub trait ClusterStateMachine: StateMachine {}
+
+// Blanket implementation - any StateMachine is also a ClusterStateMachine
+impl<T> ClusterStateMachine for T where T: StateMachine {}
+
 /// High-level cluster management interface
 /// 
 /// Provides a unified API for managing Raft clusters with ergonomic operations

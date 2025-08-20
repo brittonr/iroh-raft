@@ -18,6 +18,7 @@ use iroh_raft::{
     types::NodeId,
     Result,
 };
+use bincode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -150,6 +151,7 @@ impl<S: StateMachine> RaftClusterBuilder<S> {
         let node_id = self.node_id.ok_or_else(|| RaftError::InvalidConfiguration {
             component: "cluster".to_string(),
             message: "node_id is required".to_string(),
+            backtrace: snafu::Backtrace::new(),
         })?;
 
         let bind_address = self.bind_address.unwrap_or_else(|| "127.0.0.1:0".to_string());
@@ -157,6 +159,7 @@ impl<S: StateMachine> RaftClusterBuilder<S> {
         let state_machine = self.state_machine.ok_or_else(|| RaftError::InvalidConfiguration {
             component: "cluster".to_string(),
             message: "state_machine is required".to_string(),
+        backtrace: snafu::Backtrace::new(),
         })?;
 
         let preset = self.preset.unwrap_or(Preset::Development);
@@ -262,15 +265,29 @@ impl<S: StateMachine> RaftCluster<S> {
     pub async fn create_snapshot(&mut self) -> Result<Vec<u8>> {
         let snapshot = self.state_machine.create_snapshot().await?;
         
+        // Serialize the snapshot state to bytes
+        let snapshot_bytes = bincode::serialize(&snapshot).map_err(|e| RaftError::Serialization {
+            message_type: "snapshot".to_string(),
+            source: Box::new(e),
+            backtrace: snafu::Backtrace::new(),
+        })?;
+        
         // Update metrics
         let mut metrics = self.metrics.write().await;
         metrics.snapshots_created += 1;
         
-        Ok(snapshot)
+        Ok(snapshot_bytes)
     }
 
     pub async fn restore_from_snapshot(&mut self, snapshot: &[u8]) -> Result<()> {
-        self.state_machine.restore_from_snapshot(snapshot).await
+        // Deserialize the snapshot bytes to state
+        let snapshot_state: S::State = bincode::deserialize(snapshot).map_err(|e| RaftError::Serialization {
+            message_type: "snapshot".to_string(),
+            source: Box::new(e),
+            backtrace: snafu::Backtrace::new(),
+        })?;
+        
+        self.state_machine.restore_from_snapshot(snapshot_state).await
     }
 
     pub async fn add_peer(&mut self, peer: String) -> Result<()> {
@@ -289,7 +306,7 @@ impl<S: StateMachine> RaftCluster<S> {
 }
 
 // Test helper functions
-async fn create_test_cluster(node_id: NodeId) -> RaftCluster<ExampleRaftStateMachine<KvCommand, KvState>> {
+async fn create_test_cluster(node_id: NodeId) -> RaftCluster<ExampleRaftStateMachine> {
     RaftCluster::builder()
         .node_id(node_id)
         .bind_address(format!("127.0.0.1:{}", 8000 + node_id))
@@ -299,9 +316,9 @@ async fn create_test_cluster(node_id: NodeId) -> RaftCluster<ExampleRaftStateMac
         .unwrap()
 }
 
-async fn create_test_cluster_with_peers(node_id: NodeId, peer_count: usize) -> RaftCluster<ExampleRaftStateMachine<KvCommand, KvState>> {
+async fn create_test_cluster_with_peers(node_id: NodeId, peer_count: usize) -> RaftCluster<ExampleRaftStateMachine> {
     let peers: Vec<String> = (1..=peer_count)
-        .filter(|&id| id != node_id)
+        .filter(|&id| id as u64 != node_id)
         .map(|id| format!("127.0.0.1:{}", 8000 + id))
         .collect();
 
@@ -338,14 +355,14 @@ async fn test_cluster_creation_with_peers() {
 #[tokio::test]
 async fn test_cluster_configuration_validation() {
     // Test missing node_id
-    let result = RaftCluster::<ExampleRaftStateMachine<KvCommand, KvState>>::builder()
+    let result = RaftCluster::<ExampleRaftStateMachine>::builder()
         .bind_address("127.0.0.1:8080")
         .state_machine(ExampleRaftStateMachine::new_kv_store())
         .build()
         .await;
     
     assert!(result.is_err());
-    if let Err(RaftError::InvalidConfiguration { component, message }) = result {
+    if let Err(RaftError::InvalidConfiguration { component, message, .. }) = result {
         assert_eq!(component, "cluster");
         assert!(message.contains("node_id is required"));
     } else {
@@ -353,14 +370,14 @@ async fn test_cluster_configuration_validation() {
     }
 
     // Test missing state_machine
-    let result = RaftCluster::<ExampleRaftStateMachine<KvCommand, KvState>>::builder()
+    let result = RaftCluster::<ExampleRaftStateMachine>::builder()
         .node_id(1)
         .bind_address("127.0.0.1:8080")
         .build()
         .await;
     
     assert!(result.is_err());
-    if let Err(RaftError::InvalidConfiguration { component, message }) = result {
+    if let Err(RaftError::InvalidConfiguration { component, message, .. }) = result {
         assert_eq!(component, "cluster");
         assert!(message.contains("state_machine is required"));
     } else {
@@ -603,6 +620,7 @@ async fn test_error_handling_invalid_operations() {
     #[derive(Debug)]
     struct ErrorProneStateMachine {
         should_error: bool,
+        state: String,
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -614,6 +632,9 @@ async fn test_error_handling_invalid_operations() {
     impl StateMachine for ErrorProneStateMachine {
         type Command = TestCommand;
         type State = String;
+        type Response = ();
+        type Query = ();
+        type QueryResponse = String;
 
         async fn apply_command(&mut self, command: Self::Command) -> Result<()> {
             match command {
@@ -621,30 +642,32 @@ async fn test_error_handling_invalid_operations() {
                 TestCommand::Error => Err(RaftError::InvalidConfiguration {
                     component: "test".to_string(),
                     message: "Simulated error".to_string(),
+                    backtrace: snafu::Backtrace::new(),
                 }),
             }
         }
 
-        async fn create_snapshot(&self) -> Result<Vec<u8>> {
-            Ok(b"test_snapshot".to_vec())
+        async fn create_snapshot(&self) -> Result<String> {
+            Ok(self.get_current_state().clone())
         }
 
-        async fn restore_from_snapshot(&mut self, _snapshot: &[u8]) -> Result<()> {
+        async fn restore_from_snapshot(&mut self, snapshot: String) -> Result<()> {
+            self.state = snapshot;
             Ok(())
         }
 
+        async fn execute_query(&self, _query: Self::Query) -> Result<Self::QueryResponse> {
+            Ok(self.get_current_state().clone())
+        }
+
         fn get_current_state(&self) -> &Self::State {
-            if self.should_error {
-                &"error_state".to_string()
-            } else {
-                &"ok_state".to_string()
-            }
+            &self.state
         }
     }
 
     let mut cluster = RaftCluster::builder()
         .node_id(1)
-        .state_machine(ErrorProneStateMachine { should_error: false })
+        .state_machine(ErrorProneStateMachine { should_error: false, state: "ok_state".to_string() })
         .build()
         .await
         .unwrap();
@@ -657,7 +680,7 @@ async fn test_error_handling_invalid_operations() {
     let result = cluster.propose(TestCommand::Error).await;
     assert!(result.is_err());
 
-    if let Err(RaftError::InvalidConfiguration { component, message }) = result {
+    if let Err(RaftError::InvalidConfiguration { component, message, .. }) = result {
         assert_eq!(component, "test");
         assert_eq!(message, "Simulated error");
     } else {
@@ -828,7 +851,7 @@ proptest! {
             
             // All expected keys should be present
             for key in expected_keys {
-                prop_assert!(state.contains_key(&key));
+                prop_assert!(state.data.contains_key(&key));
             }
 
             // Metrics should be consistent
@@ -836,7 +859,9 @@ proptest! {
             prop_assert_eq!(metrics.node_id, node_id);
             prop_assert_eq!(metrics.proposals_applied, operation_count as u64);
             prop_assert_eq!(metrics.commit_index, operation_count as u64);
-        });
+            
+            Ok(())
+        }).unwrap();
     }
 
     #[test]
@@ -901,10 +926,12 @@ proptest! {
             // Additional keys should only be in the original
             for i in 0..additional_data_size {
                 let key = format!("additional_{}", i);
-                prop_assert!(original_state.contains_key(&key));
-                prop_assert!(!restored_state.contains_key(&key));
+                prop_assert!(original_state.data.contains_key(&key));
+                prop_assert!(!restored_state.data.contains_key(&key));
             }
-        });
+            
+            Ok(())
+        }).unwrap();
     }
 
     #[test]
@@ -952,7 +979,9 @@ proptest! {
             let final_peer_count = (initial_peer_count + peers_to_add).saturating_sub(peers_to_actually_remove);
             prop_assert_eq!(cluster.peers().len(), final_peer_count);
             prop_assert_eq!(cluster.metrics().await.peer_count, final_peer_count);
-        });
+            
+            Ok(())
+        }).unwrap();
     }
 }
 
@@ -1048,6 +1077,9 @@ impl CounterStateMachine {
 impl StateMachine for CounterStateMachine {
     type Command = CounterCommand;
     type State = (i64, Vec<CounterOperation>);
+        type Response = ();
+        type Query = ();
+        type QueryResponse = (i64, Vec<CounterOperation>);
 
     async fn apply_command(&mut self, command: Self::Command) -> Result<()> {
         match command {
@@ -1077,25 +1109,19 @@ impl StateMachine for CounterStateMachine {
         Ok(())
     }
 
-    async fn create_snapshot(&self) -> Result<Vec<u8>> {
-        let state = (self.counter, self.operations.clone());
-        Ok(bincode::serialize(&state).map_err(|e| RaftError::SerializationError {
-            operation: "create_snapshot".to_string(),
-            message: e.to_string(),
-        })?)
+    async fn create_snapshot(&self) -> Result<(i64, Vec<CounterOperation>)> {
+        Ok((self.counter, self.operations.clone()))
     }
 
-    async fn restore_from_snapshot(&mut self, snapshot: &[u8]) -> Result<()> {
-        let (counter, operations): (i64, Vec<CounterOperation>) = 
-            bincode::deserialize(snapshot).map_err(|e| RaftError::SerializationError {
-                operation: "restore_from_snapshot".to_string(),
-                message: e.to_string(),
-            })?;
-        
-        self.counter = counter;
-        self.operations = operations;
+    async fn restore_from_snapshot(&mut self, snapshot: (i64, Vec<CounterOperation>)) -> Result<()> {
+        self.counter = snapshot.0;
+        self.operations = snapshot.1;
         Ok(())
     }
+
+        async fn execute_query(&self, _query: Self::Query) -> Result<Self::QueryResponse> {
+            Ok(self.get_current_state().clone())
+        }
 
     fn get_current_state(&self) -> &Self::State {
         // This is a bit awkward due to the lifetime requirements, but works for testing

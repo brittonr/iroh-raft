@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("===============================================");
 
     // Initialize logging
-    tracing_subscriber::init();
+    tracing_subscriber::fmt::init();
 
     // 1. Metrics Registry Setup
     println!("\n1. Setting Up Metrics Collection:");

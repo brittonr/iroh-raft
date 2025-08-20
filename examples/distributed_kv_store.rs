@@ -21,7 +21,7 @@ use iroh_raft::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::{timeout, sleep};
 
@@ -190,8 +190,11 @@ impl DistributedKvStore {
 impl StateMachine for DistributedKvStore {
     type Command = DistributedKvCommand;
     type State = (HashMap<String, KvEntry>, StoreStats);
+    type Response = DistributedKvResponse;
+    type Query = DistributedKvCommand; // Read-only commands
+    type QueryResponse = DistributedKvResponse;
 
-    async fn apply_command(&mut self, command: Self::Command) -> Result<()> {
+    async fn apply_command(&mut self, command: Self::Command) -> Result<Self::Response> {
         self.cleanup_expired_keys();
 
         match command {
@@ -225,11 +228,12 @@ impl StateMachine for DistributedKvStore {
             }
 
             DistributedKvCommand::CompareAndSwap { key, expected_version, new_value, metadata } => {
+                let now = Self::current_timestamp();
+                let new_version = self.next_version();
                 if let Some(entry) = self.data.get_mut(&key) {
                     if entry.version == expected_version {
-                        let now = Self::current_timestamp();
                         entry.value = new_value;
-                        entry.version = self.next_version();
+                        entry.version = new_version;
                         entry.updated_at = now;
                         entry.metadata = metadata;
                     }
@@ -239,19 +243,20 @@ impl StateMachine for DistributedKvStore {
 
             DistributedKvCommand::Increment { key, delta } => {
                 let now = Self::current_timestamp();
+                let version = self.next_version();
                 
                 if let Some(entry) = self.data.get_mut(&key) {
                     if let Ok(current_value) = entry.value.parse::<i64>() {
                         let new_value = current_value + delta;
                         entry.value = new_value.to_string();
-                        entry.version = self.next_version();
+                        entry.version = version;
                         entry.updated_at = now;
                     }
                 } else {
                     // Create new entry with delta as initial value
                     let entry = KvEntry {
                         value: delta.to_string(),
-                        version: self.next_version(),
+                        version: version,
                         created_at: now,
                         updated_at: now,
                         ttl: None,
@@ -305,23 +310,16 @@ impl StateMachine for DistributedKvStore {
             }
         }
 
-        Ok(())
+        Ok(DistributedKvResponse::Success)
     }
 
-    async fn create_snapshot(&self) -> Result<Vec<u8>> {
+    async fn create_snapshot(&self) -> Result<Self::State> {
         let state = (self.data.clone(), self.stats.clone());
-        Ok(bincode::serialize(&state).map_err(|e| RaftError::SerializationError {
-            operation: "create_snapshot".to_string(),
-            message: e.to_string(),
-        })?)
+        Ok(state)
     }
 
-    async fn restore_from_snapshot(&mut self, snapshot: &[u8]) -> Result<()> {
-        let (data, stats): (HashMap<String, KvEntry>, StoreStats) = 
-            bincode::deserialize(snapshot).map_err(|e| RaftError::SerializationError {
-                operation: "restore_from_snapshot".to_string(),
-                message: e.to_string(),
-            })?;
+    async fn restore_from_snapshot(&mut self, snapshot: Self::State) -> Result<()> {
+        let (data, stats) = snapshot;
         
         self.data = data;
         self.stats = stats;
@@ -330,8 +328,94 @@ impl StateMachine for DistributedKvStore {
     }
 
     fn get_current_state(&self) -> &Self::State {
-        unsafe {
-            std::mem::transmute(&(self.data, self.stats))
+        // This is a workaround since we can't return a reference to a temporary
+        // In a real implementation, State would be a field in the struct
+        // For now, we'll panic as this is a design issue that needs to be addressed
+        panic!("get_current_state not properly implemented - State should be a field")
+    }
+
+    async fn execute_query(&self, query: Self::Query) -> Result<Self::QueryResponse> {
+        match query {
+            DistributedKvCommand::Get { key } => {
+                match self.data.get(&key) {
+                    Some(entry) => {
+                        // Check if expired
+                        if let Some(ttl) = entry.ttl {
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
+                            if entry.updated_at + ttl < now {
+                                Ok(DistributedKvResponse::Value(None))
+                            } else {
+                                Ok(DistributedKvResponse::Value(Some(entry.clone())))
+                            }
+                        } else {
+                            Ok(DistributedKvResponse::Value(Some(entry.clone())))
+                        }
+                    }
+                    None => Ok(DistributedKvResponse::Value(None)),
+                }
+            }
+            DistributedKvCommand::GetMultiple { keys } => {
+                let mut results = HashMap::new();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                for key in keys {
+                    if let Some(entry) = self.data.get(&key) {
+                        // Check if expired
+                        let is_expired = entry.ttl
+                            .map(|ttl| entry.updated_at + ttl < now)
+                            .unwrap_or(false);
+                        
+                        if !is_expired {
+                            results.insert(key, entry.clone());
+                        }
+                    }
+                }
+                Ok(DistributedKvResponse::Values(results))
+            }
+            DistributedKvCommand::ListKeys { prefix, limit } => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+
+                let mut keys: Vec<String> = self.data
+                    .iter()
+                    .filter(|(key, entry)| {
+                        // Filter by prefix
+                        let matches_prefix = prefix.as_ref()
+                            .map(|p| key.starts_with(p))
+                            .unwrap_or(true);
+                        
+                        // Filter out expired keys
+                        let not_expired = entry.ttl
+                            .map(|ttl| entry.updated_at + ttl >= now)
+                            .unwrap_or(true);
+                        
+                        matches_prefix && not_expired
+                    })
+                    .map(|(key, _)| key.clone())
+                    .collect();
+
+                keys.sort();
+                
+                if let Some(limit) = limit {
+                    keys.truncate(limit);
+                }
+
+                Ok(DistributedKvResponse::Keys(keys))
+            }
+            // Write operations are not supported in queries
+            _ => Err(RaftError::InvalidInput {
+                parameter: "query".to_string(),
+                message: "Write operations not supported in queries".to_string(),
+                backtrace: snafu::Backtrace::new(),
+            }),
         }
     }
 }
@@ -339,7 +423,7 @@ impl StateMachine for DistributedKvStore {
 /// Distributed KV store cluster node
 pub struct DistributedKvNode {
     node_id: NodeId,
-    cluster: RaftCluster<DistributedKvStore>,
+    cluster: simple_cluster_example::RaftCluster<DistributedKvStore>,
     client_handlers: Arc<RwLock<Vec<mpsc::UnboundedSender<ClientRequest>>>>,
     metrics: Arc<RwLock<NodeMetrics>>,
 }
@@ -370,11 +454,11 @@ pub struct DistributedKvClient {
 
 impl DistributedKvNode {
     pub async fn new(node_id: NodeId, peers: Vec<String>) -> Result<Self> {
-        let cluster = RaftCluster::builder()
+        let cluster = simple_cluster_example::RaftCluster::builder()
             .node_id(node_id)
             .bind_address(format!("127.0.0.1:{}", 8000 + node_id))
             .peers(peers)
-            .preset(Preset::Production)
+            .preset(simple_cluster_example::Preset::Production)
             .state_machine(DistributedKvStore::new())
             .build()
             .await?;
@@ -451,94 +535,97 @@ impl DistributedKvNode {
             DistributedKvCommand::Expire { .. }
         );
 
-        let response = match &request.command {
+        let response = if is_write_operation {
             // Write operations go through Raft consensus
-            cmd if is_write_operation => {
-                match self.cluster.propose(cmd.clone()).await {
-                    Ok(_) => DistributedKvResponse::Success,
-                    Err(e) => DistributedKvResponse::Error(e.to_string()),
-                }
+            match self.cluster.propose(request.command.clone()).await {
+                Ok(_) => DistributedKvResponse::Success,
+                Err(e) => DistributedKvResponse::Error(e.to_string()),
             }
-
-            // Read operations can be served locally
-            DistributedKvCommand::Get { key } => {
-                let state = self.cluster.query();
-                match state.0.get(key) {
-                    Some(entry) => {
-                        // Check if expired
-                        if let Some(ttl) = entry.ttl {
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
-                            if entry.updated_at + ttl < now {
-                                DistributedKvResponse::Value(None)
+        } else {
+            // Read operations can be served locally using execute_query  
+            match &request.command {
+                DistributedKvCommand::Get { key } => {
+                    let state = self.cluster.query();
+                    match state.0.get(key) {
+                        Some(entry) => {
+                            // Check if expired
+                            if let Some(ttl) = entry.ttl {
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                if entry.updated_at + ttl < now {
+                                    DistributedKvResponse::Value(None)
+                                } else {
+                                    DistributedKvResponse::Value(Some(entry.clone()))
+                                }
                             } else {
                                 DistributedKvResponse::Value(Some(entry.clone()))
                             }
-                        } else {
-                            DistributedKvResponse::Value(Some(entry.clone()))
                         }
-                    }
-                    None => DistributedKvResponse::Value(None),
-                }
-            }
-
-            DistributedKvCommand::GetMultiple { keys } => {
-                let state = self.cluster.query();
-                let mut results = HashMap::new();
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                for key in keys {
-                    if let Some(entry) = state.0.get(key) {
-                        // Check if expired
-                        let is_expired = entry.ttl
-                            .map(|ttl| entry.updated_at + ttl < now)
-                            .unwrap_or(false);
-                        
-                        if !is_expired {
-                            results.insert(key.clone(), entry.clone());
-                        }
+                        None => DistributedKvResponse::Value(None),
                     }
                 }
-                DistributedKvResponse::Values(results)
-            }
 
-            DistributedKvCommand::ListKeys { prefix, limit } => {
-                let state = self.cluster.query();
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                DistributedKvCommand::GetMultiple { keys } => {
+                    let state = self.cluster.query();
+                    let mut results = HashMap::new();
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
 
-                let mut keys: Vec<String> = state.0
-                    .iter()
-                    .filter(|(key, entry)| {
-                        // Filter by prefix
-                        let matches_prefix = prefix.as_ref()
-                            .map(|p| key.starts_with(p))
-                            .unwrap_or(true);
-                        
-                        // Filter out expired keys
-                        let not_expired = entry.ttl
-                            .map(|ttl| entry.updated_at + ttl >= now)
-                            .unwrap_or(true);
-                        
-                        matches_prefix && not_expired
-                    })
-                    .map(|(key, _)| key.clone())
-                    .collect();
-
-                keys.sort();
-                
-                if let Some(limit) = limit {
-                    keys.truncate(*limit);
+                    for key in keys {
+                        if let Some(entry) = state.0.get(key) {
+                            // Check if expired
+                            let is_expired = entry.ttl
+                                .map(|ttl| entry.updated_at + ttl < now)
+                                .unwrap_or(false);
+                            
+                            if !is_expired {
+                                results.insert(key.clone(), entry.clone());
+                            }
+                        }
+                    }
+                    DistributedKvResponse::Values(results)
                 }
 
-                DistributedKvResponse::Keys(keys)
+                DistributedKvCommand::ListKeys { prefix, limit } => {
+                    let state = self.cluster.query();
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+
+                    let mut keys: Vec<String> = state.0
+                        .iter()
+                        .filter(|(key, entry)| {
+                            // Filter by prefix
+                            let matches_prefix = prefix.as_ref()
+                                .map(|p| key.starts_with(p))
+                                .unwrap_or(true);
+                            
+                            // Filter out expired keys
+                            let not_expired = entry.ttl
+                                .map(|ttl| entry.updated_at + ttl >= now)
+                                .unwrap_or(true);
+                            
+                            matches_prefix && not_expired
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect();
+
+                    keys.sort();
+                    
+                    if let Some(limit) = limit {
+                        keys.truncate(*limit);
+                    }
+
+                    DistributedKvResponse::Keys(keys)
+                }
+
+                // Write operations should not reach here due to is_write_operation check
+                _ => DistributedKvResponse::Error("Invalid read operation".to_string()),
             }
         };
 
@@ -573,7 +660,7 @@ impl DistributedKvNode {
         self.metrics.read().await.clone()
     }
 
-    pub async fn get_cluster_status(&self) -> ClusterMetrics {
+    pub async fn get_cluster_status(&self) -> simple_cluster_example::ClusterMetrics {
         self.cluster.metrics().await
     }
 }
@@ -602,6 +689,7 @@ impl DistributedKvClient {
         node_sender.send(request).map_err(|_| RaftError::InvalidConfiguration {
             component: "client".to_string(),
             message: "Failed to send request to node".to_string(),
+            backtrace: snafu::Backtrace::new(),
         })?;
 
         // Wait for response with timeout
@@ -610,10 +698,12 @@ impl DistributedKvClient {
             Ok(None) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Node disconnected".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
             Err(_) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Request timeout".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
@@ -638,10 +728,12 @@ impl DistributedKvClient {
             DistributedKvResponse::Error(e) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: e,
+                backtrace: snafu::Backtrace::new(),
             }),
             _ => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Unexpected response".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
@@ -656,10 +748,12 @@ impl DistributedKvClient {
             DistributedKvResponse::Error(e) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: e,
+                backtrace: snafu::Backtrace::new(),
             }),
             _ => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Unexpected response".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
@@ -674,10 +768,12 @@ impl DistributedKvClient {
             DistributedKvResponse::Error(e) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: e,
+                backtrace: snafu::Backtrace::new(),
             }),
             _ => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Unexpected response".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
@@ -693,10 +789,12 @@ impl DistributedKvClient {
             DistributedKvResponse::Error(e) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: e,
+                backtrace: snafu::Backtrace::new(),
             }),
             _ => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Unexpected response".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
@@ -721,10 +819,12 @@ impl DistributedKvClient {
             DistributedKvResponse::Error(e) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: e,
+                backtrace: snafu::Backtrace::new(),
             }),
             _ => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Unexpected response".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
@@ -740,18 +840,20 @@ impl DistributedKvClient {
             DistributedKvResponse::Error(e) => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: e,
+                backtrace: snafu::Backtrace::new(),
             }),
             _ => Err(RaftError::InvalidConfiguration {
                 component: "client".to_string(),
                 message: "Unexpected response".to_string(),
+                backtrace: snafu::Backtrace::new(),
             }),
         }
     }
 }
 
 // Mock cluster implementation for the example
-use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
-use std::time::Instant;
+// Examples cannot import from each other in Rust
+// use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -784,7 +886,7 @@ async fn main() -> Result<()> {
     let node_senders: Vec<mpsc::UnboundedSender<ClientRequest>> = client_channels
         .into_iter()
         .map(|mut rx| {
-            let (tx, mut local_rx) = mpsc::unbounded_channel();
+            let (tx, mut local_rx) = mpsc::unbounded_channel::<ClientRequest>();
             
             // Forward requests to the actual node handler
             tokio::spawn(async move {
@@ -1001,7 +1103,7 @@ mod simple_cluster_example {
         }
 
         pub async fn propose(&mut self, command: S::Command) -> Result<()> {
-            self.state_machine.apply_command(command).await
+            self.state_machine.apply_command(command).await.map(|_| ())
         }
 
         pub fn query(&self) -> &S::State {

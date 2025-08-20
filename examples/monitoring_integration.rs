@@ -27,8 +27,9 @@ use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::{timeout, sleep, interval};
 
 // Re-use types from previous examples
-use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
-use crate::distributed_kv_store::{DistributedKvStore, DistributedKvCommand};
+// Note: Examples cannot import from each other in Rust
+// use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
+// use crate::distributed_kv_store::{DistributedKvStore, DistributedKvCommand};
 
 /// Comprehensive metrics registry
 #[derive(Debug)]
@@ -303,7 +304,7 @@ pub enum ComparisonOperator {
     NotEqual,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AlertSeverity {
     Info,
     Warning,

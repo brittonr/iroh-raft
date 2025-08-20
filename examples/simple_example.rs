@@ -9,6 +9,7 @@ use iroh_raft::{
     raft::{ExampleRaftStateMachine, GenericProposal, KvCommand, StateMachine},
     Result,
 };
+use snafu;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,6 +24,7 @@ async fn main() -> Result<()> {
         .map_err(|e: ConfigError| RaftError::InvalidConfiguration {
             component: "example".to_string(),
             message: format!("Config error: {}", e),
+            backtrace: snafu::Backtrace::new(),
         })?;
 
     println!(

@@ -26,8 +26,110 @@ use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::{timeout, sleep, interval};
 
 // Re-use types from previous examples
-use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
-use crate::distributed_kv_store::{DistributedKvStore, DistributedKvCommand};
+// Examples cannot import from each other in Rust
+// use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
+// use crate::distributed_kv_store::{DistributedKvStore, DistributedKvCommand};
+
+// Mock types since examples can't import from each other
+mod simple_cluster_example {
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    pub enum Preset {
+        Development,
+        Testing,
+        Production,
+    }
+
+    #[derive(Debug)]
+    pub struct RaftCluster<S: StateMachine> {
+        _phantom: std::marker::PhantomData<S>,
+    }
+
+    impl<S: StateMachine> RaftCluster<S> {
+        pub fn builder() -> RaftClusterBuilder<S> {
+            RaftClusterBuilder::new()
+        }
+
+        pub async fn metrics(&self) -> ClusterMetrics {
+            ClusterMetrics {
+                node_id: 1,
+                is_leader: true,
+                term: 1,
+            }
+        }
+
+        pub async fn add_peer(&mut self, _peer: String) -> Result<()> {
+            Ok(())
+        }
+
+        pub async fn remove_peer(&mut self, _peer: &str) -> Result<()> {
+            Ok(())
+        }
+
+        pub async fn shutdown(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        pub fn query(&self) -> &S::State {
+            // This would normally return the current state
+            panic!("query not implemented in mock")
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct ClusterMetrics {
+        pub node_id: NodeId,
+        pub is_leader: bool,
+        pub term: u64,
+    }
+
+    pub struct RaftClusterBuilder<S: StateMachine> {
+        _phantom: std::marker::PhantomData<S>,
+    }
+
+    impl<S: StateMachine> RaftClusterBuilder<S> {
+        pub fn new() -> Self {
+            Self {
+                _phantom: std::marker::PhantomData,
+            }
+        }
+
+        pub fn node_id(self, _id: NodeId) -> Self {
+            self
+        }
+
+        pub fn bind_address<A: Into<String>>(self, _address: A) -> Self {
+            self
+        }
+
+        pub fn peers<I>(self, _peers: I) -> Self
+        where
+            I: IntoIterator,
+            I::Item: Into<String>,
+        {
+            self
+        }
+
+        pub fn preset(self, _preset: Preset) -> Self {
+            self
+        }
+
+        pub fn state_machine(self, _sm: S) -> Self {
+            self
+        }
+
+        pub fn data_dir<P: AsRef<str>>(self, _path: P) -> Self {
+            self
+        }
+
+        pub async fn build(self) -> Result<RaftCluster<S>> {
+            Ok(RaftCluster {
+                _phantom: std::marker::PhantomData,
+            })
+        }
+    }
+}
 
 /// Cluster deployment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,7 +211,7 @@ pub struct ClusterManager {
 #[derive(Debug)]
 pub struct DeployedNode {
     pub config: NodeConfig,
-    pub cluster: RaftCluster<DistributedKvStore>,
+    pub cluster: simple_cluster_example::RaftCluster<distributed_kv_store::DistributedKvStore>,
     pub status: NodeStatus,
     pub metrics: NodeMetrics,
     pub last_seen: SystemTime,
@@ -261,6 +363,7 @@ impl ClusterManager {
             return Err(RaftError::InvalidConfiguration {
                 component: "cluster".to_string(),
                 message: "Minimum 3 nodes required for production deployment".to_string(),
+                backtrace: snafu::Backtrace::new(),
             });
         }
 
@@ -279,6 +382,7 @@ impl ClusterManager {
             return Err(RaftError::InvalidConfiguration {
                 component: "cluster".to_string(),
                 message: "Node IDs must be unique".to_string(),
+                backtrace: snafu::Backtrace::new(),
             });
         }
 
@@ -290,6 +394,7 @@ impl ClusterManager {
                 return Err(RaftError::InvalidConfiguration {
                     component: "cluster".to_string(),
                     message: format!("Duplicate endpoint: {}", endpoint),
+                    backtrace: snafu::Backtrace::new(),
                 });
             }
         }
@@ -311,18 +416,18 @@ impl ClusterManager {
 
         // Create cluster configuration based on environment
         let preset = match self.config.environment {
-            Environment::Development => Preset::Development,
-            Environment::Staging => Preset::Testing,
-            Environment::Production => Preset::Production,
+            Environment::Development => simple_cluster_example::Preset::Development,
+            Environment::Staging => simple_cluster_example::Preset::Testing,
+            Environment::Production => simple_cluster_example::Preset::Production,
         };
 
-        let cluster = RaftCluster::builder()
+        let cluster = simple_cluster_example::RaftCluster::builder()
             .node_id(node_config.node_id)
             .bind_address(format!("{}:{}", node_config.hostname, node_config.port))
             .peers(peers)
             .preset(preset)
             .data_dir(&node_config.data_dir)
-            .state_machine(DistributedKvStore::new())
+            .state_machine(distributed_kv_store::DistributedKvStore::new())
             .build()
             .await?;
 
@@ -382,6 +487,7 @@ impl ClusterManager {
         Err(RaftError::InvalidConfiguration {
             component: "cluster".to_string(),
             message: "Cluster failed to form within timeout".to_string(),
+            backtrace: snafu::Backtrace::new(),
         })
     }
 
@@ -505,6 +611,7 @@ impl ClusterManager {
         Err(RaftError::InvalidConfiguration {
             component: "cluster".to_string(),
             message: format!("Node {} failed to become healthy", node_id),
+            backtrace: snafu::Backtrace::new(),
         })
     }
 
@@ -528,6 +635,7 @@ impl ClusterManager {
             return Err(RaftError::InvalidConfiguration {
                 component: "cluster".to_string(),
                 message: format!("Expected 1 leader, found {}", leader_count),
+                backtrace: snafu::Backtrace::new(),
             });
         }
 
@@ -536,6 +644,7 @@ impl ClusterManager {
             return Err(RaftError::InvalidConfiguration {
                 component: "cluster".to_string(),
                 message: format!("Insufficient healthy nodes: {}/{}", healthy_count, required_healthy),
+                backtrace: snafu::Backtrace::new(),
             });
         }
 
@@ -575,6 +684,7 @@ impl ClusterManager {
             return Err(RaftError::InvalidConfiguration {
                 component: "cluster".to_string(),
                 message: format!("Node {} not found", node_id),
+                backtrace: snafu::Backtrace::new(),
             });
         };
 
@@ -665,9 +775,10 @@ impl ServiceDiscovery {
     }
 
     async fn register_node(&self, endpoint: ServiceEndpoint) {
-        self.nodes.write().await.insert(endpoint.node_id, endpoint);
+        let node_id = endpoint.node_id;
+        self.nodes.write().await.insert(node_id, endpoint);
         self.health_checks.write().await.insert(
-            endpoint.node_id,
+            node_id,
             HealthStatus {
                 status: NodeStatus::Starting,
                 last_check: SystemTime::now(),
@@ -828,6 +939,7 @@ impl BackupManager {
         let backup_record = backup_record.ok_or_else(|| RaftError::InvalidConfiguration {
             component: "backup".to_string(),
             message: format!("Backup {} not found", backup_id),
+            backtrace: snafu::Backtrace::new(),
         })?;
 
         println!("   📦 Found backup: {} ({} bytes, {} nodes)", 
@@ -1066,112 +1178,6 @@ async fn simulate_production_load() {
     println!("   ✅ Production load simulation complete");
 }
 
-// Mock implementations to make the example compile
-mod simple_cluster_example {
-    use super::*;
-
-    #[derive(Debug)]
-    pub struct RaftCluster<S: StateMachine> {
-        node_id: NodeId,
-        state_machine: S,
-    }
-
-    pub struct RaftClusterBuilder<S: StateMachine> {
-        node_id: Option<NodeId>,
-        state_machine: Option<S>,
-    }
-
-    #[derive(Debug, Clone)]
-    pub enum Preset {
-        Development,
-        Testing,
-        Production,
-    }
-
-    #[derive(Debug, Clone)]
-    pub struct ClusterMetrics {
-        pub node_id: NodeId,
-        pub is_leader: bool,
-        pub term: u64,
-    }
-
-    impl<S: StateMachine> RaftCluster<S> {
-        pub fn builder() -> RaftClusterBuilder<S> {
-            RaftClusterBuilder {
-                node_id: None,
-                state_machine: None,
-            }
-        }
-
-        pub fn query(&self) -> &S::State {
-            self.state_machine.get_current_state()
-        }
-
-        pub async fn metrics(&self) -> ClusterMetrics {
-            ClusterMetrics {
-                node_id: self.node_id,
-                is_leader: self.node_id == 1, // Node 1 is always leader in mock
-                term: 1,
-            }
-        }
-
-        pub async fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-
-        pub async fn shutdown(&mut self) -> Result<()> {
-            Ok(())
-        }
-
-        pub async fn add_peer(&mut self, _peer: String) -> Result<()> {
-            Ok(())
-        }
-
-        pub async fn remove_peer(&mut self, _peer: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<S: StateMachine> RaftClusterBuilder<S> {
-        pub fn node_id(mut self, id: NodeId) -> Self {
-            self.node_id = Some(id);
-            self
-        }
-
-        pub fn bind_address<A: Into<String>>(self, _address: A) -> Self {
-            self
-        }
-
-        pub fn peers<I>(self, _peers: I) -> Self 
-        where 
-            I: IntoIterator,
-            I::Item: Into<String>,
-        {
-            self
-        }
-
-        pub fn state_machine(mut self, sm: S) -> Self {
-            self.state_machine = Some(sm);
-            self
-        }
-
-        pub fn preset(self, _preset: Preset) -> Self {
-            self
-        }
-
-        pub fn data_dir<P: AsRef<std::path::Path>>(self, _dir: P) -> Self {
-            self
-        }
-
-        pub async fn build(self) -> Result<RaftCluster<S>> {
-            Ok(RaftCluster {
-                node_id: self.node_id.unwrap(),
-                state_machine: self.state_machine.unwrap(),
-            })
-        }
-    }
-}
-
 mod distributed_kv_store {
     use super::*;
 
@@ -1185,6 +1191,12 @@ mod distributed_kv_store {
         Set { key: String, value: String },
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum DistributedKvResponse {
+        Success,
+        Error(String),
+    }
+
     impl DistributedKvStore {
         pub fn new() -> Self {
             Self {
@@ -1196,28 +1208,44 @@ mod distributed_kv_store {
     impl StateMachine for DistributedKvStore {
         type Command = DistributedKvCommand;
         type State = (HashMap<String, String>, ());
+        type Response = DistributedKvResponse;
+        type Query = DistributedKvCommand;
+        type QueryResponse = DistributedKvResponse;
 
-        async fn apply_command(&mut self, command: Self::Command) -> Result<()> {
+        async fn apply_command(&mut self, command: Self::Command) -> Result<Self::Response> {
             match command {
                 DistributedKvCommand::Set { key, value } => {
                     self.data.insert(key, value);
                 }
             }
-            Ok(())
+            Ok(DistributedKvResponse::Success)
         }
 
-        async fn create_snapshot(&self) -> Result<Vec<u8>> {
-            Ok(bincode::serialize(&self.data).unwrap())
+        async fn create_snapshot(&self) -> Result<Self::State> {
+            Ok((self.data.clone(), ()))
         }
 
-        async fn restore_from_snapshot(&mut self, snapshot: &[u8]) -> Result<()> {
-            self.data = bincode::deserialize(snapshot).unwrap();
+        async fn restore_from_snapshot(&mut self, snapshot: Self::State) -> Result<()> {
+            self.data = snapshot.0;
             Ok(())
         }
 
         fn get_current_state(&self) -> &Self::State {
-            unsafe {
-                std::mem::transmute(&(self.data, ()))
+            // This is a workaround since we can't return a reference to a temporary
+            // In a real implementation, State would be a field in the struct
+            panic!("get_current_state not properly implemented - State should be a field")
+        }
+
+        async fn execute_query(&self, query: Self::Query) -> Result<Self::QueryResponse> {
+            match query {
+                DistributedKvCommand::Set { .. } => {
+                    // Write operations not supported in queries
+                    Err(RaftError::InvalidInput {
+                        parameter: "query".to_string(),
+                        message: "Write operations not supported in queries".to_string(),
+                        backtrace: snafu::Backtrace::new(),
+                    })
+                }
             }
         }
     }

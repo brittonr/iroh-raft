@@ -175,6 +175,38 @@ where
     }
 }
 
+// Implement StateMachine for GenericRaftStateMachine
+impl<T> StateMachine for GenericRaftStateMachine<T>
+where
+    T: StateMachine,
+{
+    type Command = T::Command;
+    type State = T::State;
+    type Response = T::Response;
+    type Query = T::Query;
+    type QueryResponse = T::QueryResponse;
+
+    async fn apply_command(&mut self, command: Self::Command) -> Result<Self::Response, RaftError> {
+        self.inner.apply_command(command).await
+    }
+
+    async fn create_snapshot(&self) -> Result<Self::State, RaftError> {
+        self.inner.create_snapshot().await
+    }
+
+    async fn restore_from_snapshot(&mut self, snapshot: Self::State) -> Result<(), RaftError> {
+        self.inner.restore_from_snapshot(snapshot).await
+    }
+
+    fn get_current_state(&self) -> &Self::State {
+        self.inner.get_current_state()
+    }
+
+    async fn execute_query(&self, query: Self::Query) -> Result<Self::QueryResponse, RaftError> {
+        self.inner.execute_query(query).await
+    }
+}
+
 /// Helper trait to create command entries for submission to Raft
 pub trait CommandEncoder {
     /// Command type that can be encoded and submitted to Raft

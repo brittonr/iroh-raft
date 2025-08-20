@@ -95,7 +95,7 @@
 //! }
 //! ```
 
-use crate::config::{Config, ConfigError};
+use crate::config::Config;
 use crate::error::RaftError;
 use crate::types::NodeId;
 use serde::{Deserialize, Serialize};
@@ -112,6 +112,19 @@ use uuid::Uuid;
 
 #[cfg(feature = "metrics-otel")]
 use crate::metrics::MetricsRegistry;
+
+// Management API imports (feature-gated)
+#[cfg(feature = "management-api")]
+use axum::{
+    extract::{State, Path},
+    http::StatusCode,
+    Json,
+    Router,
+    routing::{get, post, put, delete},
+};
+
+#[cfg(feature = "management-api")]
+use serde_json::json;
 
 /// Simplified state machine trait for the high-level API
 ///
@@ -160,7 +173,7 @@ struct ClusterInner<SM: StateMachine> {
     health: Arc<RwLock<ClusterHealth>>,
     #[cfg(feature = "metrics-otel")]
     metrics: MetricsRegistry,
-    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     shutdown_complete: Arc<tokio::sync::Notify>,
 }
 
@@ -432,6 +445,7 @@ impl<SM: StateMachine> ClusterBuilder<SM> {
         self.config.validate().map_err(|e| RaftError::InvalidConfiguration {
             component: "cluster_builder".to_string(),
             message: format!("Configuration validation failed: {}", e),
+            backtrace: snafu::Backtrace::new(),
         })?;
 
         // Create shutdown channels
@@ -440,7 +454,7 @@ impl<SM: StateMachine> ClusterBuilder<SM> {
 
         // Initialize metrics if enabled
         #[cfg(feature = "metrics-otel")]
-        let metrics = MetricsRegistry::new(&self.config.observability.metrics)?;
+        let metrics = MetricsRegistry::new(&self.config.observability.metrics.prefix)?;
 
         // Create cluster status
         let status = ClusterStatus {
@@ -477,7 +491,7 @@ impl<SM: StateMachine> ClusterBuilder<SM> {
             health: Arc::new(RwLock::new(health)),
             #[cfg(feature = "metrics-otel")]
             metrics,
-            shutdown_tx: Some(shutdown_tx),
+            shutdown_tx: Arc::new(Mutex::new(Some(shutdown_tx))),
             shutdown_complete: shutdown_complete.clone(),
         };
 
@@ -522,7 +536,7 @@ impl<SM: StateMachine> RaftCluster<SM> {
         // TODO: Implement actual Raft proposal
         // For now, just apply directly to demonstrate the API
         let mut state_machine = self.inner.state_machine.write().await;
-        state_machine.apply(command).await.map_err(|e| RaftError::StateMachine(Box::new(e)))?;
+        state_machine.apply(command).await.map_err(|e| RaftError::Internal { message: format!("State machine error: {}", e), backtrace: snafu::Backtrace::new() })?;
         
         #[cfg(feature = "metrics-otel")]
         {
@@ -656,7 +670,7 @@ impl<SM: StateMachine> RaftCluster<SM> {
         tracing::info!("Initiating cluster shutdown");
         
         // Signal shutdown to all components
-        if let Some(tx) = self.inner.shutdown_tx.take() {
+        if let Some(tx) = self.inner.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
         }
         
@@ -896,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn test_cluster_builder() {
         let cluster = RaftCluster::builder(1)
-            .bind_address("127.0.0.1:0".parse().unwrap())
+            .bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .data_dir("/tmp/test-cluster")
             .debug(true)
             .build(TestStateMachine {
@@ -934,7 +948,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_management() {
         let cluster = RaftCluster::builder(1)
-            .bind_address("127.0.0.1:0".parse().unwrap())
+            .bind_address("127.0.0.1:0".parse::<SocketAddr>().unwrap())
             .build(TestStateMachine {
                 state: TestState {
                     data: HashMap::new(),

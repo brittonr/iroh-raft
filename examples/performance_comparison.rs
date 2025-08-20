@@ -25,8 +25,9 @@ use tokio::sync::{mpsc, RwLock, Mutex};
 use tokio::time::timeout;
 
 // Re-use mock implementations from previous examples
-use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
-use crate::management_api_example::{MockHttpClient, MockResponse};
+// Examples cannot import from each other in Rust
+// use crate::simple_cluster_example::{RaftCluster, ClusterMetrics, Preset};
+// use crate::management_api_example::{MockHttpClient, MockResponse};
 
 /// Performance test configuration
 #[derive(Debug, Clone)]

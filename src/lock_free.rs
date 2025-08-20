@@ -342,7 +342,7 @@ impl<T: Clone> LockFreeRingBuffer<T> {
         }
         
         Self {
-            buffer,
+            _buffer: buffer,
             write_index: AtomicUsize::new(0),
             capacity,
         }

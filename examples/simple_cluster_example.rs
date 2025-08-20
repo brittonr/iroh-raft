@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
     println!("-----------------------------");
 
     // Try to create cluster without required fields
-    let result = RaftCluster::<ExampleRaftStateMachine<KvCommand, KvState>>::builder()
+    let result = RaftCluster::<ExampleRaftStateMachine>::builder()
         .bind_address("127.0.0.1:8080")
         // Missing node_id and state_machine
         .build()
@@ -428,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn test_cluster_builder_validation() {
         // Test missing node_id
-        let result = RaftCluster::<ExampleRaftStateMachine<KvCommand, KvState>>::builder()
+        let result = RaftCluster::<ExampleRaftStateMachine>::builder()
             .bind_address("127.0.0.1:8080")
             .state_machine(ExampleRaftStateMachine::new_kv_store())
             .build()
@@ -436,7 +436,7 @@ mod tests {
         assert!(result.is_err());
 
         // Test missing state_machine  
-        let result = RaftCluster::<ExampleRaftStateMachine<KvCommand, KvState>>::builder()
+        let result = RaftCluster::<ExampleRaftStateMachine>::builder()
             .node_id(1)
             .bind_address("127.0.0.1:8080")
             .build()
