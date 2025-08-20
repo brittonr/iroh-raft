@@ -76,4 +76,4 @@ simulation/Cargo.lock
 *.pem
 *.key
 *.crt
-examples/madsim_demo/target
+examples/madsim_demo/target/
